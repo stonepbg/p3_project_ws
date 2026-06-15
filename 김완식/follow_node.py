@@ -9,6 +9,7 @@ from ultralytics import YOLO
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
 
 # 패키지 내부 파일 경로
 PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,7 @@ class FollowNode(Node):
         super().__init__("follow_node")
         # /target_cmd 발행: linear.x=거리(m), angular.z=각도(rad)
         self.cmd_pub = self.create_publisher(Twist, "/target_cmd", 10)
+        self.search_pub = self.create_publisher(String, "/search_cmd", 10)
 
         self.get_logger().info("loading YOLO...")
         self.model = YOLO(MODEL_PATH)
@@ -76,6 +78,12 @@ class FollowNode(Node):
         msg.linear.x = float(distance)
         msg.angular.z = float(angle)
         self.cmd_pub.publish(msg)
+
+    def publish_search(self, direction):
+        # direction: "left" 또는 "right"
+        msg = String()
+        msg.data = direction
+        self.search_pub.publish(msg)
 
     def loop(self):
         frames = self.pipeline.wait_for_frames()
@@ -131,15 +139,10 @@ class FollowNode(Node):
                         (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                         0.6, (0, 0, 255), 2)
         elif self.target_id is not None:
-            # 타겟 소실 - 마지막 본 방향으로 탐색 각도 발행 (거리 0)
+            # 타겟 소실 - 마지막 본 방향으로 search_cmd 발행
             status = "SEARCHING_ROTATE"
-            distance = 0.0
-            if self.last_seen_side == "right":
-                angle = -SEARCH_ANGLE
-            elif self.last_seen_side == "left":
-                angle = SEARCH_ANGLE
-            else:
-                angle = SEARCH_ANGLE
+            search_dir = self.last_seen_side if self.last_seen_side else "left"
+            self.publish_search(search_dir)
             if people:
                 valid = {t: v for t, v in people.items() if v[2] > 0}
                 if valid:
@@ -154,7 +157,9 @@ class FollowNode(Node):
                         self.relock_count = 0
                         self.get_logger().info(f"[RELOCK] target_id={self.target_id}")
 
-        self.publish_cmd(distance, angle)
+        # FOLLOWING 상태일 때만 target_cmd 발행 (소실 시엔 search_cmd만)
+        if status == "FOLLOWING":
+            self.publish_cmd(distance, angle)
 
         for tid, (cx, cy, dist, (x1, y1, x2, y2)) in people.items():
             if tid == self.target_id:
