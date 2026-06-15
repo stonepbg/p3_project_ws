@@ -2,6 +2,10 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+from rclpy.qos import qos_profile_sensor_data
+import math
+import time
 
 class PersonFollower(Node):
     def __init__(self):
@@ -14,11 +18,19 @@ class PersonFollower(Node):
             self.target_callback,
             10)
             
+        # [추가] 라이다 데이터 구독 (/scan) - QoS 프로파일 필수 적용
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            qos_profile_sensor_data)
+            
         # 2. 로봇 하부 모터로 주행 명령 발행 (/cmd_vel)
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         
         # --- 제어 파라미터 (튜닝값) ---
         self.target_distance = 1.0  # 타겟 1m 앞에서 정지
+        self.safe_distance = 0.35   # [추가] 벽 충돌 방지 안전 거리 (0.35m)
         
         # 선속도 제어 파라미터 (Linear)
         self.kp_linear = 0.5        # 전진 속도 비례 상수
@@ -30,8 +42,34 @@ class PersonFollower(Node):
         self.max_angular_speed = 0.8 # 최대 회전 속도 (rad/s)
         self.deadband_angular = 0.05 # +- 0.05 rad (약 2.8도) 안에서는 회전 정지
         
-        self.get_logger().info('Person Follower Node has been started!')
+        # [추가] 라이다 센서 데이터 저장 변수
+        self.min_dist_front = float('inf')
+        self.min_dist_back = float('inf')
+
+        self.get_logger().info('Person Follower Node (LiDAR Safety & E-Stop applied) has been started!')
         self.get_logger().info(f'Target Distance: {self.target_distance}m')
+
+    def scan_callback(self, msg):
+        min_f = float('inf')
+        min_b = float('inf')
+
+        for i, r in enumerate(msg.ranges):
+            # 노이즈 및 에러 데이터 필터링
+            if r < 0.05 or r > 10.0 or math.isinf(r) or math.isnan(r):
+                continue
+
+            angle = msg.angle_min + i * msg.angle_increment
+            angle = math.atan2(math.sin(angle), math.cos(angle))
+            deg = math.degrees(angle)
+
+            # 전방 60도(-30~30) 및 후방 60도(150~-150) 최소 거리 측정
+            if -30 <= deg <= 30:
+                min_f = min(min_f, r)
+            elif deg >= 150 or deg <= -150:
+                min_b = min(min_b, r)
+
+        self.min_dist_front = min_f
+        self.min_dist_back = min_b
 
     def target_callback(self, msg):
         # 카메라 파트에서 받은 원시 데이터
@@ -42,7 +80,6 @@ class PersonFollower(Node):
         
         # 만약 타겟 소실 상태 (카메라 노드에서 거리를 0으로 보낼 경우 등) 예외 처리
         if current_distance <= 0.01:
-            # 타겟을 찾기 위해 제자리에서 천천히 회전 (카메라 파트에서 이미 처리했다면 생략 가능)
             self.get_logger().info('Target lost. Waiting or searching...')
             cmd_msg.linear.x = 0.0
             cmd_msg.angular.z = 0.0 # 일단 정지
@@ -58,15 +95,12 @@ class PersonFollower(Node):
         if abs(distance_error) < self.deadband_linear:
             cmd_msg.linear.x = 0.0
         else:
-            # 오차에 비례 상수 곱하기
             raw_linear_vel = distance_error * self.kp_linear
-            # 최대 속도 제한 (클리핑)
             cmd_msg.linear.x = max(min(raw_linear_vel, self.max_linear_speed), -self.max_linear_speed)
 
         # ---------------------------------------------
         # 2. 회전 속도 계산 (P Control)
         # ---------------------------------------------
-        # 약속한 부호(좌측+, 우측-)가 cmd_vel의 회전 방향과 일치하므로 그대로 사용
         if abs(target_angle_rad) < self.deadband_angular:
             cmd_msg.angular.z = 0.0
         else:
@@ -74,15 +108,36 @@ class PersonFollower(Node):
             cmd_msg.angular.z = max(min(raw_angular_vel, self.max_angular_speed), -self.max_angular_speed)
 
         # ---------------------------------------------
-        # 3. 로봇으로 명령 전송
+        # 3. [추가] 라이다 충돌 방지 안전장치
+        # ---------------------------------------------
+        status_text = "TRACKING"
+        if cmd_msg.linear.x > 0 and self.min_dist_front < self.safe_distance:
+            cmd_msg.linear.x = 0.0
+            status_text = "FRONT_BLOCKED"
+        elif cmd_msg.linear.x < 0 and self.min_dist_back < self.safe_distance:
+            cmd_msg.linear.x = 0.0
+            status_text = "BACK_BLOCKED"
+
+        # ---------------------------------------------
+        # 4. 로봇으로 명령 전송
         # ---------------------------------------------
         self.publisher.publish(cmd_msg)
         
-        # 현재 상태 로깅 (디버깅용)
-        self.get_logger().debug(
-            f'Dist: {current_distance:.2f}m (Err: {distance_error:.2f}) -> Vel: {cmd_msg.linear.x:.2f} | '
-            f'Ang: {target_angle_rad:.2f}rad -> AngVel: {cmd_msg.angular.z:.2f}'
+        # 현재 상태 로깅 (화면에 보이도록 info로 수정)
+        self.get_logger().info(
+            f'[{status_text}] Dist: {current_distance:.2f}m (Err: {distance_error:.2f}) -> Vel: {cmd_msg.linear.x:.2f} | '
+            f'Ang: {target_angle_rad:.2f}rad -> AngVel: {cmd_msg.angular.z:.2f} | '
+            f'Lidar F: {self.min_dist_front:.2f}m, B: {self.min_dist_back:.2f}m'
         )
+
+    # [추가] 긴급 정지 발동 함수
+    def emergency_stop(self):
+        self.get_logger().warn('EMERGENCY STOP: Halting all motors...')
+        stop_msg = Twist()
+        stop_msg.linear.x = 0.0
+        stop_msg.angular.z = 0.0
+        self.publisher.publish(stop_msg)
+        time.sleep(0.1)  # 통신선이 끊어지기 전 모터가 명령을 받을 수 있도록 0.1초 딜레이 부여
 
 def main(args=None):
     rclpy.init(args=args)
@@ -92,9 +147,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # 안전 종료 시 로봇 정지
-        stop_msg = Twist()
-        node.publisher.publish(stop_msg)
+        # 안전 종료 시 무조건 긴급 정지 함수 실행 후 노드 종료
+        node.emergency_stop()
         node.destroy_node()
         rclpy.shutdown()
 
