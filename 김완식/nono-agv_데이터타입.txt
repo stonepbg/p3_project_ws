@@ -1,0 +1,3 @@
+토픽: /target_cmd
+타입: geometry_msgs/Twist
+데이터: linear.x (전후 m/s), angular.z (회전 rad/s)
