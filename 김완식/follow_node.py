@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import numpy as np
 import cv2
 import pyrealsense2 as rs
@@ -14,28 +15,21 @@ PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(PKG_DIR, "yolo11n.pt")
 TRACKER_PATH = os.path.join(PKG_DIR, "botsort_reid.yaml")
 
-# ===== 제어 파라미터 =====
-TARGET_DIST = 1.0
-DIST_DEADZONE = 0.15
+# ===== 파라미터 =====
 CENTER_X = 320
-CX_DEADZONE = 40
-MAX_LINEAR = 0.08
-MAX_ANGULAR = 0.3
-KP_LINEAR = 0.4
-KP_ANGULAR = 0.003
+IMG_WIDTH = 640
+HFOV_DEG = 69.0          # D435 RGB 수평 FOV
 LOCK_FRAMES = 15
-SHOW_WINDOW = True   # 모니터에 창 표시 (False면 헤드리스)
-# =========================
-
-
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
+SHOW_WINDOW = True
+SEARCH_ANGLE = 0.3       # 타겟 소실 시 탐색용 각도 (rad)
+# ====================
 
 
 class FollowNode(Node):
     def __init__(self):
         super().__init__("follow_node")
-        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        # /target_cmd 발행: linear.x=거리(m), angular.z=각도(rad)
+        self.cmd_pub = self.create_publisher(Twist, "/target_cmd", 10)
 
         self.get_logger().info("loading YOLO...")
         self.model = YOLO(MODEL_PATH)
@@ -52,13 +46,11 @@ class FollowNode(Node):
         self.target_id = None
         self.frame_count = 0
         self.last_seen_side = None
-        self.search_angular = 0.15
         self.relock_candidate = None
         self.relock_count = 0
-        self.RELOCK_NEED = 8  # 연속 8프레임 보여야 락
+        self.RELOCK_NEED = 8
         self.get_logger().info("follow_node started. target = nearest person")
 
-        # 30Hz 루프
         self.timer = self.create_timer(1.0 / 30.0, self.loop)
 
     def median_depth(self, depth_frame, cx, cy, k=5):
@@ -71,10 +63,18 @@ class FollowNode(Node):
                     vals.append(d)
         return float(np.median(vals)) if vals else 0.0
 
-    def publish_cmd(self, linear, angular):
+    def pixel_to_angle(self, cx):
+        # cx_err: 화면 중심 대비 픽셀 오차
+        # 왼쪽(+), 오른쪽(-) 부호로 라디안 각도 반환
+        cx_err = cx - CENTER_X
+        angle = -(cx_err / IMG_WIDTH) * math.radians(HFOV_DEG)
+        return angle
+
+    def publish_cmd(self, distance, angle):
+        # linear.x = 거리(m), angular.z = 각도(rad)
         msg = Twist()
-        msg.linear.x = float(linear)
-        msg.angular.z = float(angular)
+        msg.linear.x = float(distance)
+        msg.angular.z = float(angle)
         self.cmd_pub.publish(msg)
 
     def loop(self):
@@ -110,22 +110,19 @@ class FollowNode(Node):
                     f"[LOCK] target_id={self.target_id} "
                     f"dist={valid[self.target_id][2]:.2f}m")
 
-        linear, angular = 0.0, 0.0
+        # 발행할 값: distance(m), angle(rad)
+        distance, angle = 0.0, 0.0
         status = "SEARCHING"
 
         if self.target_id is not None and self.target_id in people:
             cx, cy, dist, (x1, y1, x2, y2) = people[self.target_id]
             if dist > 0:
-                dist_err = dist - TARGET_DIST
-                if abs(dist_err) > DIST_DEADZONE:
-                    linear = clamp(KP_LINEAR * dist_err, -MAX_LINEAR, MAX_LINEAR)
-                cx_err = cx - CENTER_X
-                if abs(cx_err) > CX_DEADZONE:
-                    angular = clamp(-KP_ANGULAR * cx_err, -MAX_ANGULAR, MAX_ANGULAR)
+                distance = dist
+                angle = self.pixel_to_angle(cx)
                 status = "FOLLOWING"
-                if cx < CENTER_X - CX_DEADZONE:
+                if cx < CENTER_X - 40:
                     self.last_seen_side = "left"
-                elif cx > CENTER_X + CX_DEADZONE:
+                elif cx > CENTER_X + 40:
                     self.last_seen_side = "right"
             else:
                 status = "TARGET_NO_DEPTH"
@@ -134,14 +131,15 @@ class FollowNode(Node):
                         (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                         0.6, (0, 0, 255), 2)
         elif self.target_id is not None:
+            # 타겟 소실 - 마지막 본 방향으로 탐색 각도 발행 (거리 0)
             status = "SEARCHING_ROTATE"
-            linear = 0.0  # 탐색 중 전진 금지 (제자리 회전만)
+            distance = 0.0
             if self.last_seen_side == "right":
-                angular = -self.search_angular
+                angle = -SEARCH_ANGLE
             elif self.last_seen_side == "left":
-                angular = self.search_angular
+                angle = SEARCH_ANGLE
             else:
-                angular = self.search_angular  # 방향 기록 없으면 기본 좌회전
+                angle = SEARCH_ANGLE
             if people:
                 valid = {t: v for t, v in people.items() if v[2] > 0}
                 if valid:
@@ -156,8 +154,7 @@ class FollowNode(Node):
                         self.relock_count = 0
                         self.get_logger().info(f"[RELOCK] target_id={self.target_id}")
 
-        # 타겟 잃거나 없으면 정지값 발행
-        self.publish_cmd(linear, angular)
+        self.publish_cmd(distance, angle)
 
         for tid, (cx, cy, dist, (x1, y1, x2, y2)) in people.items():
             if tid == self.target_id:
@@ -168,13 +165,13 @@ class FollowNode(Node):
             cv2.line(annotated, (CENTER_X, 0), (CENTER_X, 480), (255, 0, 0), 1)
             cv2.putText(annotated, status, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(annotated, f"lin:{linear:+.3f} ang:{angular:+.3f}",
+            cv2.putText(annotated, f"dist:{distance:.2f}m ang:{angle:+.3f}rad",
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.imshow("follow", annotated)
             cv2.waitKey(1)
 
-    def stop_robot(self):
-        # 정지 명령을 여러 번 발행하고 실제 전송 시간 확보
+    def stop_cmd(self):
+        # 종료 시 정지 의미: 거리 0, 각도 0 여러 번 발행
         try:
             for _ in range(10):
                 self.publish_cmd(0.0, 0.0)
@@ -199,8 +196,8 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("종료 - 로봇 정지")
-        node.stop_robot()  # 컨텍스트 살아있을 때 정지 명령
+        node.get_logger().info("종료 - 정지 신호 발행")
+        node.stop_cmd()
     finally:
         node.destroy_node()
         if rclpy.ok():
@@ -209,4 +206,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-jon8g@jon8g-desktop:~/follow_ws/src/follow_tracker/follow_tracker$
