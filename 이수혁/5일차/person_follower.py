@@ -20,43 +20,47 @@ class PersonFollower(Node):
         self.target_sub = self.create_subscription(Twist, '/target_cmd', self.target_callback, 10)
         self.search_sub = self.create_subscription(String, '/search_cmd', self.search_callback, 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
-        
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         
-        # --- 제어 파라미터 (튜닝값) ---
+        # --- 제어 파라미터 ---
         self.target_distance = 1.0  
-        self.safe_distance = 0.35   # 벽 충돌 방지 안전 거리
+        self.safe_distance = 0.45    # [수정] 충돌 방지 거리 증가 (0.35 -> 0.45)
         
-        # 선속도 제어 파라미터 (Linear)
         self.kp_linear = 0.5        
         self.max_linear_speed = 0.4 
-        self.deadband_linear = 0.1  
+        self.deadband_linear = 0.15  # [수정] 예민한 후진 방지를 위해 데드존 확대 (15cm)
         
-        # 각속도 제어 파라미터 (Angular)
         self.kp_angular = 1.2       
         self.max_angular_speed = 0.8 
         self.deadband_angular = 0.05 
         
-        # 탐색(Search) 파라미터
-        self.search_speed = 0.12    # [수정] 오버슛 방지를 위해 기존 0.2에서 0.12로 대폭 감속
+        self.search_speed = 0.12    
         
         # --- 상태 저장 변수 ---
-        self.current_state = "TRACKING"  
+        self.current_state = "WAITING"  
         self.search_direction = ""
+        self.last_state_str = "WAITING"  # 로그 상태 변화 감지용
         
         self.current_distance = 1.0
         self.target_angle_rad = 0.0
-        
         self.min_dist_front = float('inf')
         self.min_dist_back = float('inf')
 
+        self.log_counter = 0
+
         self.timer = self.create_timer(0.05, self.control_loop)
 
-        self.get_logger().info('Person Follower Node (Hard Brake Applied) Started!')
-        self.get_logger().info('*** Press "q" or "Ctrl+C" to cleanly stop the robot. ***')
+        self.get_logger().info('\n' + '='*50 + '\n🚀 Person Follower Node (Anti-Noise & Wide LiDAR) Started!\n👉 Press "q" or "Ctrl+C" to cleanly stop the robot.\n' + '='*50)
 
     def target_callback(self, msg):
-        self.current_distance = msg.linear.x
+        dist = msg.linear.x
+        
+        # [핵심] AI 카메라 노이즈 필터링 (순간이동 방지)
+        if dist > 3.0:
+            # 3m 이상의 거리가 갑자기 들어오면 YOLO 오인식으로 간주하고 무시
+            return
+            
+        self.current_distance = dist
         self.target_angle_rad = msg.angular.z
 
     def search_callback(self, msg):
@@ -66,19 +70,13 @@ class PersonFollower(Node):
             self.search_direction = command
             
         elif command == "find":
-            # [수정 핵심] FIND 신호를 받으면 즉시 하드 브레이크 (PWM 0 송출)
             if self.current_state == "SEARCHING":
-                self.get_logger().info('🎯 TARGET FOUND! Applying Hard Brake.')
-                
-                # 1) 즉시 모터에 정지 명령 발행
+                # 하드 브레이크 (관성 죽이기)
                 brake_msg = Twist()
-                brake_msg.linear.x = 0.0
-                brake_msg.angular.z = 0.0
                 self.publisher.publish(brake_msg)
                 
-                # 2) 과거의 타겟 데이터 찌꺼기 초기화 (새 데이터가 올 때까지 P제어로 인한 회전 방지)
-                self.current_distance = self.target_distance  # 오차를 0으로 만듦
-                self.target_angle_rad = 0.0                   # 회전 각도를 0으로 만듦
+                self.current_distance = self.target_distance  
+                self.target_angle_rad = 0.0                   
                 
             self.current_state = "TRACKING"
             self.search_direction = ""
@@ -94,46 +92,52 @@ class PersonFollower(Node):
             angle = math.atan2(math.sin(angle), math.cos(angle))
             deg = math.degrees(angle)
 
-            if -30 <= deg <= 30:
+            # [수정] 라이다 시야각 확대 (정면/후면 모두 ±50도로 넓혀서 대각선 장애물 감지)
+            if -50 <= deg <= 50:
                 min_f = min(min_f, r)
-            elif deg >= 150 or deg <= -150:
+            elif deg >= 130 or deg <= -130:
                 min_b = min(min_b, r)
 
         self.min_dist_front = min_f
         self.min_dist_back = min_b
 
+    def log_state_change(self, new_state_str):
+        if self.last_state_str != new_state_str:
+            self.get_logger().info(f"\n======================================\n🔄 STATE CHANGED: {self.last_state_str} ➡️  {new_state_str}\n======================================")
+            self.last_state_str = new_state_str
+
     def control_loop(self):
-        # 1. 키보드 'q' 입력 감지
+        # 1. 키보드 'q' 감지
         try:
             if select.select([sys.stdin], [], [], 0.0)[0]:
                 char = sys.stdin.read(1)
                 if char.lower() == 'q':
-                    self.get_logger().warn("'q' key pressed! Initiating emergency stop...")
+                    self.get_logger().warn("\n🚨 'q' key pressed! Initiating emergency stop...")
                     raise KeyboardInterrupt
         except ValueError:
             pass
 
-        # 2. 메인 주행 로직
         cmd_msg = Twist()
         status_text = ""
+        current_state_str = self.current_state
 
         # [모드 A] 탐색 모드 (SEARCHING)
         if self.current_state == "SEARCHING":
+            current_state_str = f"SEARCHING ({self.search_direction})"
             cmd_msg.linear.x = 0.0
             if self.search_direction == "left":
                 cmd_msg.angular.z = self.search_speed
             elif self.search_direction == "right":
                 cmd_msg.angular.z = -self.search_speed
-            else:
-                cmd_msg.angular.z = 0.0
-            status_text = f"SEARCHING ({self.search_direction})"
+            status_text = f"SEARCH ({self.search_direction})"
 
         # [모드 B] 추종 모드 (TRACKING)
         elif self.current_state == "TRACKING":
             if self.current_distance <= 0.01:
                 cmd_msg.linear.x = 0.0
                 cmd_msg.angular.z = 0.0
-                status_text = "WAITING"
+                status_text = "STANDBY"
+                current_state_str = "STANDBY (Dist 0)"
             else:
                 distance_error = self.current_distance - self.target_distance
                 if abs(distance_error) < self.deadband_linear:
@@ -148,28 +152,34 @@ class PersonFollower(Node):
                     raw_angular_vel = self.target_angle_rad * self.kp_angular
                     cmd_msg.angular.z = max(min(raw_angular_vel, self.max_angular_speed), -self.max_angular_speed)
                 status_text = "TRACKING"
+                
+        else:
+            status_text = "WAITING"
 
-        # 3. 라이다 충돌 방지
+        # 3. 라이다 충돌 방지 오버라이드
         if cmd_msg.linear.x > 0 and self.min_dist_front < self.safe_distance:
             cmd_msg.linear.x = 0.0
-            status_text += "[FRONT_BLOCKED]"
+            status_text = "FRONT_BLOCKED"
         elif cmd_msg.linear.x < 0 and self.min_dist_back < self.safe_distance:
             cmd_msg.linear.x = 0.0
-            status_text += "[BACK_BLOCKED]"
+            status_text = "BACK_BLOCKED"
 
         self.publisher.publish(cmd_msg)
         
-        self.get_logger().info(
-            f'[{status_text}] Dist: {self.current_distance:.2f}m -> Vel: {cmd_msg.linear.x:.2f} | '
-            f'Ang: {self.target_angle_rad:.2f}rad -> AngVel: {cmd_msg.angular.z:.2f} | '
-            f'Lidar F: {self.min_dist_front:.2f}m B: {self.min_dist_back:.2f}m'
-        )
+        # 4. 스마트 로깅 (상태 변화 알림 & 0.5초 단위 요약 출력)
+        self.log_state_change(current_state_str)
+        
+        self.log_counter += 1
+        if self.log_counter % 10 == 0:  # 0.05 * 10 = 0.5초마다 출력
+            self.get_logger().info(
+                f'[{status_text:^13}] Dist: {self.current_distance:.2f}m | Vel: {cmd_msg.linear.x:+.2f} | '
+                f'Ang: {self.target_angle_rad:+.2f}rad | AngVel: {cmd_msg.angular.z:+.2f} | '
+                f'Lidar F: {self.min_dist_front:.2f}m B: {self.min_dist_back:.2f}m'
+            )
 
     def emergency_stop(self):
-        self.get_logger().warn('EMERGENCY STOP: Halting all motors immediately...')
+        self.get_logger().warn('\n🛑 EMERGENCY STOP: Halting all motors immediately...')
         stop_msg = Twist()
-        stop_msg.linear.x = 0.0
-        stop_msg.angular.z = 0.0
         self.publisher.publish(stop_msg)
         time.sleep(0.1)
 
