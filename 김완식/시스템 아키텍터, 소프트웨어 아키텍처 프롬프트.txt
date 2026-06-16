@@ -1,0 +1,80 @@
+설계도 생성 프롬프트 (Follow-me 모바일 매니퓰레이터 로봇)
+아래 두 프롬프트를 각각 LLM(노트북LM 등)에 입력하면 다이어그램을 그려준다.
+다이어그램 도구(draw.io, Mermaid, Excalidraw 등)에 맞춰 "어떤 형식으로 출력해달라"는 한 줄을
+프롬프트 맨 끝에 덧붙이면 된다. (예: "Mermaid 문법으로 출력해줘")
+
+
+[프롬프트 1] 하드웨어 설계도 (Hardware Architecture Diagram)
+다음 사양의 모바일 매니퓰레이터 로봇 시스템에 대한 **하드웨어 구성도(블록 다이어그램)**를 그려줘.
+각 장치는 박스로, 장치 간 연결은 화살표(또는 선)로 표현하고, 연결선 위에 통신/연결 방식을 라벨로 명시해줘.
+물리 장치 (박스)
+Jetson Orin Nano (IP 192.168.0.103) — 메인 비전·제어 컴퓨트. AGV 상단에 탑재됨.
+AGV 내장 Jetson Nano (IP 192.168.0.101) — myAGV 2023 내부 컴퓨터. 라이다·모터 제어 및 Nav2/SLAM 구동.
+myCobot 280 Pi (ARM) (IP 192.168.0.102) — 6축 로봇팔.
+동료 PC (IP 192.168.0.155) — 웹 대시보드 운영.
+RealSense D435 — 깊이 카메라.
+그리퍼 카메라 — 로봇팔 그리퍼에 부착된 카메라.
+2D LiDAR — AGV에 장착.
+구동 모터 — AGV 바퀴 모터.
+블루투스 스피커 — 음성 안내 출력용.
+WiFi 공유기 — 무선 네트워크 허브.
+AGV 배터리 — 전원 공급원.
+연결 관계 (화살표 + 라벨)
+RealSense D435 → Jetson Orin Nano : USB 3.0
+그리퍼 카메라 → myCobot 280 Pi (ARM) : USB
+2D LiDAR → AGV 내장 Jetson Nano : USB/Serial
+구동 모터 ↔ AGV 내장 Jetson Nano : 모터 제어 (내부 배선)
+블루투스 스피커 ↔ Jetson Orin Nano : Bluetooth
+Jetson Orin Nano ↔ WiFi 공유기 : WiFi
+AGV 내장 Jetson Nano ↔ WiFi 공유기 : WiFi
+myCobot 280 Pi (ARM) ↔ WiFi 공유기 : WiFi
+동료 PC ↔ WiFi 공유기 : WiFi
+AGV 배터리 → Jetson Orin Nano : DC 전원 공급
+표현 요청
+4개의 컴퓨터(Orin, AGV Nano, ARM, PC)가 WiFi 공유기를 중심으로 무선 연결된 구조가 한눈에 보이도록 배치.
+WiFi로 연결된 4대는 모두 ROS2 (Fast-DDS) 로 통신한다는 점을 공유기 근처에 라벨로 표시.
+"AGV(myAGV 2023)" 를 큰 점선 박스로 묶고, 그 안에 [AGV 내장 Jetson Nano + LiDAR + 모터 + 배터리]를 포함. Orin Nano는 AGV 상단에 탑재되므로 AGV 박스 위에 걸치거나 인접 배치.
+전원 연결선(AGV 배터리 → Orin)은 데이터선과 다른 색/스타일로 구분.
+
+
+[프롬프트 2] 소프트웨어 설계도 (ROS2 Node & Topic Diagram)
+다음 사양의 ROS2 기반 로봇 소프트웨어에 대한 노드-토픽 관계도를 그려줘.
+노드는 둥근 박스, 토픽은 화살표로 표현하고, 화살표에 토픽 이름과 메시지 타입을 함께 라벨로 표시해줘.
+노드는 실행되는 하드웨어(Orin / AGV Nano / 동료 PC)별로 그룹(점선 영역)으로 묶어줘.
+실행 위치별 노드
+[Jetson Orin Nano]
+fsm_node — 모드 전환 관리(시스템 중심). 대시보드 입력에 따라 모드 결정.
+follow_node — 추종 모드. RealSense로 사람 거리·방향 계산.
+gripper_vision_node — 그리퍼 카메라 영상 처리.
+tts_node — 음성 안내(블루투스 스피커 출력).
+[AGV 내장 Jetson Nano]
+agv_control_node — 추종 명령(거리·각도)을 받아 실제 속도(cmd_vel)로 변환. 비상정지 처리.
+nav2 — 자율주행 경로 생성·추종.
+slam — 지도 작성·위치 추정.
+motor_driver — cmd_vel을 받아 모터 구동.
+[동료 PC]
+rosbridge_server — 웹소켓 ↔ ROS2 브리지.
+web_dashboard — 사용자 인터페이스(모드 선택, 목적지 입력, 비상정지 버튼).
+토픽 (화살표: From → To / 이름 / 타입)
+/mode_cmd (std_msgs/String) : web_dashboard → (rosbridge) → fsm_node — 모드 선택
+/goal_pose (geometry_msgs/PoseStamped) : fsm_node → nav2 — 목적지 좌표
+/target_cmd (geometry_msgs/Twist) : follow_node → agv_control_node — 사람 거리(linear.x), 각도(angular.z)
+/emergency_stop (std_msgs/Bool) : fsm_node → agv_control_node — 비상정지 신호
+/cmd_vel (geometry_msgs/Twist) : agv_control_node → motor_driver — 최종 속도 명령
+/cmd_vel (geometry_msgs/Twist) : nav2 → motor_driver — 자율주행 속도 명령
+/tts_text (std_msgs/String) : fsm_node → tts_node — 안내 음성 텍스트
+/gripper_image (sensor_msgs/Image) : gripper_vision_node 가 구독 (ARM의 그리퍼 카메라가 발행)
+/scan (sensor_msgs/LaserScan) : LiDAR(드라이버) → slam, nav2
+/odom (nav_msgs/Odometry), /tf : AGV → nav2, slam, fsm_node
+/emergency_stop (std_msgs/Bool) : web_dashboard → (rosbridge) → fsm_node — 대시보드 비상정지 버튼
+4개 모드별 색상 구분 (범례 포함)
+화살표(토픽)를 활성화되는 모드에 따라 색으로 구분하고, 범례를 넣어줘.
+추종 모드 (파랑) : /target_cmd → agv_control_node → /cmd_vel
+안내 모드 (초록) : /goal_pose → nav2, /tts_text → tts_node, /gripper_image(따라오는 사람 확인)
+자율주행 모드 (주황) : /goal_pose → nav2 → /cmd_vel (음성·저속 없음)
+비상정지 모드 (빨강) : /emergency_stop → agv_control_node → /cmd_vel=0
+공통 (회색) : /mode_cmd, /scan, /odom, /tf, /cmd_vel
+핵심 흐름 (강조)
+중심에 fsm_node를 두고, 사용자가 대시보드에서 모드를 선택(/mode_cmd)하면 fsm_node가 모드를 전환하는 구조가 잘 드러나게.
+추종 모드: 사람 시야 이탈 시 follow_node가 거리=0으로 발행하여 탐색 상태로 전환(주석으로 표시).
+비상정지: 대시보드 → fsm_node → /emergency_stop → agv_control_node가 cmd_vel을 0으로 만들어 정지.
