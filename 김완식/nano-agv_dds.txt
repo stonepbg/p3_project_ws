@@ -30,7 +30,7 @@ angle_rad = (cx_err / 640) * radians(69)
 
 **토픽:** `/search_cmd`
 **타입:** `std_msgs/String`
-**데이터:** `"left"` 또는 `"right"` 두 값만
+**데이터:** `"left"` 또는 `"right"`, "find"
 
 ---
 
@@ -41,6 +41,7 @@ angle_rad = (cx_err / 640) * radians(69)
 **방향 규칙:**
 - `"left"` → 사람이 화면 왼쪽으로 사라짐 → AGV 좌회전(CCW)
 - `"right"` → 사람이 화면 오른쪽으로 사라짐 → AGV 우회전(CW)
+- "find" -> 사람찾으면 10번보냄 -> AGV 정지
 
 (target_cmd의 각도 부호 규칙과 동일: 왼쪽=좌회전, 오른쪽=우회전)
 
