@@ -78,3 +78,37 @@ web_dashboard — 사용자 인터페이스(모드 선택, 목적지 입력, 비
 중심에 fsm_node를 두고, 사용자가 대시보드에서 모드를 선택(/mode_cmd)하면 fsm_node가 모드를 전환하는 구조가 잘 드러나게.
 추종 모드: 사람 시야 이탈 시 follow_node가 거리=0으로 발행하여 탐색 상태로 전환(주석으로 표시).
 비상정지: 대시보드 → fsm_node → /emergency_stop → agv_control_node가 cmd_vel을 0으로 만들어 정지.
+
+
+
+
+소프트웨어 아키텍쳐그릴때 리얼센스는 노드로 작동 안하지?
+
+Claude 응답: 맞습니다.맞습니다. RealSense는 노드가 아닙니다.
+ws님 코드에서 RealSense는 follow_node 안에서 pyrealsense2 라이브러리로 직접 제어하는 하드웨어(센서)입니다. 
+별도 ROS2 노드로 안 띄우고, follow_node 내부에서 rs.pipeline()으로 프레임을 직접 받아 쓰고 있습니다.
+
+소프트웨어 아키텍처(노드-토픽 다이어그램)에서:
+
+RealSense는 노드 박스로 그리지 않음
+follow_node의 입력(데이터 소스) 으로 표현 — 
+예: follow_node 박스 옆에 "RealSense D435 (pyrealsense2 직접 제어)"라고 주석, 또는 점선 화살표로 "카메라 프레임"이 follow_node로 들어가는 식
+
+참고 — 일반적인 ROS2 방식과의 차이:
+
+보통 RealSense는 realsense2_camera 노드로 띄워서 /camera/color/image_raw 같은 토픽을 발행하는데, 
+ws님은 그 방식 대신 라이브러리로 직접 받습니다. 더 가볍고 지연이 적은 방식입니다. 
+그래서 RealSense 관련 토픽이 ROS2에 안 보이는 게 정상입니다.
+
+그래서 소프트웨어 설계도에선:
+
+노드: follow_node (RealSense를 내부에서 사용)
+토픽: follow_node가 발행하는 /target_cmd, /search_cmd만 표시
+RealSense는 follow_node 내부 입력으로만 표기 (노드 아님)
+
+반면 하드웨어 설계도에선 RealSense를 장치 박스로 그립니다 (Orin에 USB 3.0 연결). 하드웨어에선 물리 장치니까요.
+
+정리: 소프트웨어 = 노드 아님(follow_node 내부 입력), 하드웨어 = 장치 박스로 표시.
+
+앞서 만든 설계도 프롬프트에서 이 부분이 정확한지 확인하고 싶으면, 
+소프트웨어 프롬프트의 follow_node 설명에 "RealSense를 pyrealsense2로 직접 제어(별도 노드 아님)"를 명시하는 게 좋습니다. 
