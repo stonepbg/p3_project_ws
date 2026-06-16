@@ -38,10 +38,10 @@ class PersonFollower(Node):
         self.deadband_angular = 0.05 
         
         # 탐색(Search) 파라미터
-        self.search_speed = 0.2     # 탐색 시 느리고 부드러운 회전 속도 설정
+        self.search_speed = 0.12    # [수정] 오버슛 방지를 위해 기존 0.2에서 0.12로 대폭 감속
         
         # --- 상태 저장 변수 ---
-        self.current_state = "TRACKING"  # 초기 상태
+        self.current_state = "TRACKING"  
         self.search_direction = ""
         
         self.current_distance = 1.0
@@ -50,10 +50,9 @@ class PersonFollower(Node):
         self.min_dist_front = float('inf')
         self.min_dist_back = float('inf')
 
-        # 제어 타이머 (1초에 20번 실행하며 계속 명령을 쏘고 키보드 입력을 감시함)
         self.timer = self.create_timer(0.05, self.control_loop)
 
-        self.get_logger().info('Person Follower Node (Search & E-Stop applied) has been started!')
+        self.get_logger().info('Person Follower Node (Hard Brake Applied) Started!')
         self.get_logger().info('*** Press "q" or "Ctrl+C" to cleanly stop the robot. ***')
 
     def target_callback(self, msg):
@@ -65,7 +64,22 @@ class PersonFollower(Node):
         if command in ["left", "right"]:
             self.current_state = "SEARCHING"
             self.search_direction = command
+            
         elif command == "find":
+            # [수정 핵심] FIND 신호를 받으면 즉시 하드 브레이크 (PWM 0 송출)
+            if self.current_state == "SEARCHING":
+                self.get_logger().info('🎯 TARGET FOUND! Applying Hard Brake.')
+                
+                # 1) 즉시 모터에 정지 명령 발행
+                brake_msg = Twist()
+                brake_msg.linear.x = 0.0
+                brake_msg.angular.z = 0.0
+                self.publisher.publish(brake_msg)
+                
+                # 2) 과거의 타겟 데이터 찌꺼기 초기화 (새 데이터가 올 때까지 P제어로 인한 회전 방지)
+                self.current_distance = self.target_distance  # 오차를 0으로 만듦
+                self.target_angle_rad = 0.0                   # 회전 각도를 0으로 만듦
+                
             self.current_state = "TRACKING"
             self.search_direction = ""
 
@@ -89,13 +103,13 @@ class PersonFollower(Node):
         self.min_dist_back = min_b
 
     def control_loop(self):
-        # 1. 키보드 'q' 입력 감지 (Non-blocking)
+        # 1. 키보드 'q' 입력 감지
         try:
             if select.select([sys.stdin], [], [], 0.0)[0]:
                 char = sys.stdin.read(1)
                 if char.lower() == 'q':
                     self.get_logger().warn("'q' key pressed! Initiating emergency stop...")
-                    raise KeyboardInterrupt  # 안전 종료 프로세스로 넘김
+                    raise KeyboardInterrupt
         except ValueError:
             pass
 
@@ -117,12 +131,10 @@ class PersonFollower(Node):
         # [모드 B] 추종 모드 (TRACKING)
         elif self.current_state == "TRACKING":
             if self.current_distance <= 0.01:
-                # 카메라가 거리를 0으로 보낼 때 튕겨나가지 않도록 정지 대기
                 cmd_msg.linear.x = 0.0
                 cmd_msg.angular.z = 0.0
                 status_text = "WAITING"
             else:
-                # 원본 코드의 P-Control 로직
                 distance_error = self.current_distance - self.target_distance
                 if abs(distance_error) < self.deadband_linear:
                     cmd_msg.linear.x = 0.0
@@ -137,7 +149,7 @@ class PersonFollower(Node):
                     cmd_msg.angular.z = max(min(raw_angular_vel, self.max_angular_speed), -self.max_angular_speed)
                 status_text = "TRACKING"
 
-        # 3. 라이다 충돌 방지 (앞뒤 직진만 차단, 회전은 가능)
+        # 3. 라이다 충돌 방지
         if cmd_msg.linear.x > 0 and self.min_dist_front < self.safe_distance:
             cmd_msg.linear.x = 0.0
             status_text += "[FRONT_BLOCKED]"
@@ -165,7 +177,6 @@ def main(args=None):
     rclpy.init(args=args)
     node = PersonFollower()
 
-    # 터미널 키보드 설정을 '즉시 입력(cbreak)' 모드로 변경
     old_settings = None
     try:
         old_settings = termios.tcgetattr(sys.stdin)
@@ -176,10 +187,8 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        # Ctrl+C 또는 'q' 버튼 입력 시 이곳으로 빠져나옴
         pass
     finally:
-        # 터미널 설정을 원래대로 복구하고 로봇을 멈춘 뒤 종료
         if old_settings is not None:
             try:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
