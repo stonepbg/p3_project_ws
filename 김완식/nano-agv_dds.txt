@@ -49,7 +49,7 @@ angle_rad = (cx_err / 640) * radians(69)
 
 **발행 동작:**
 - **사람 추적 중(FOLLOWING):** `/search_cmd` 발행 안 함. `/target_cmd`만 발행.
-- **사람 소실:** `/search_cmd`에 `"left"` 또는 `"right"`를 약 30Hz로 계속 발행. (이때 `/target_cmd`는 발행 안 함)
+- **사람 소실:** `/search_cmd`에 `"left"` 또는 `"right"`, find 약 10Hz로 계속 발행. (이때 `/target_cmd`는 발행 안 함)
 - **사람 재발견:** `/search_cmd` 발행 중단. `/target_cmd`(거리·각도) 재개.
 
 ---
@@ -69,6 +69,6 @@ angle_rad = (cx_err / 640) * radians(69)
 | 토픽 | 타입 | 데이터 | 용도 |
 |------|------|--------|------|
 | `/target_cmd` | geometry_msgs/Twist | linear.x=거리(m), angular.z=각도(rad) | 사람 추적 중 (follow) |
-| `/search_cmd` | std_msgs/String | "left" 또는 "right" | 사람 소실 시 탐색 회전 방향 |
+| `/search_cmd` | std_msgs/String | "left" 또는 "right", "find" | 사람 소실 시 탐색 회전 방향 |
 
 핵심 — **search_cmd는 watchdog(타임아웃 정지)이 반드시 필요**하다는 점을 AGV 엔지니어에게 강조하세요. 이게 없으면 재발견 후에도 회전이 안 멈춥니다.
