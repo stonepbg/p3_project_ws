@@ -16,7 +16,6 @@ class PersonFollower(Node):
     def __init__(self):
         super().__init__('person_follower')
         
-        # 1. Subscribers & Publisher
         self.target_sub = self.create_subscription(Twist, '/target_cmd', self.target_callback, 10)
         self.search_sub = self.create_subscription(String, '/search_cmd', self.search_callback, 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
@@ -24,11 +23,11 @@ class PersonFollower(Node):
         
         # --- 제어 파라미터 ---
         self.target_distance = 1.0  
-        self.safe_distance = 0.45    # [수정] 충돌 방지 거리 증가 (0.35 -> 0.45)
+        self.safe_distance = 0.45    
         
         self.kp_linear = 0.5        
         self.max_linear_speed = 0.4 
-        self.deadband_linear = 0.15  # [수정] 예민한 후진 방지를 위해 데드존 확대 (15cm)
+        self.deadband_linear = 0.15  
         
         self.kp_angular = 1.2       
         self.max_angular_speed = 0.8 
@@ -37,69 +36,70 @@ class PersonFollower(Node):
         self.search_speed = 0.12    
         
         # --- 상태 저장 변수 ---
-        self.current_state = "WAITING"  
+        self.current_state = "TIMEOUT"  
         self.search_direction = ""
-        self.last_state_str = "WAITING"  # 로그 상태 변화 감지용
+        self.last_state_str = "TIMEOUT" 
         
-        self.current_distance = 1.0
+        self.needs_alignment = False    # [신규] 사람을 찾은 직후 조준(Align) 모드 진입 플래그
+        
+        self.current_distance = 0.0     
         self.target_angle_rad = 0.0
-        self.min_dist_front = float('inf')
-        self.min_dist_back = float('inf')
+        
+        self.min_dist_all = float('inf') # [신규] 360도 전방위 최소 거리
+        self.last_msg_time = 0.0        
 
         self.log_counter = 0
-
         self.timer = self.create_timer(0.05, self.control_loop)
 
-        self.get_logger().info('\n' + '='*50 + '\n🚀 Person Follower Node (Anti-Noise & Wide LiDAR) Started!\n👉 Press "q" or "Ctrl+C" to cleanly stop the robot.\n' + '='*50)
+        self.get_logger().info('\n' + '='*50 + '\n🚀 Person Follower (Turn-First Align & 360 LiDAR) Started!\n👉 Press "q" or "Ctrl+C" to cleanly stop.\n' + '='*50)
 
     def target_callback(self, msg):
         dist = msg.linear.x
         
-        # [핵심] AI 카메라 노이즈 필터링 (순간이동 방지)
-        if dist > 3.0:
-            # 3m 이상의 거리가 갑자기 들어오면 YOLO 오인식으로 간주하고 무시
+        # 카메라 노이즈 필터링 (순간이동 방지)
+        if dist <= 0.01 or dist > 3.0:
+            return
+        if self.current_distance > 0.1 and abs(dist - self.current_distance) > 0.8:
             return
             
-        self.current_distance = dist
+        if self.current_distance < 0.1:
+            self.current_distance = dist
+        else:
+            self.current_distance = (0.7 * self.current_distance) + (0.3 * dist)
+            
         self.target_angle_rad = msg.angular.z
+        
+        self.last_msg_time = time.time()
+        if self.current_state in ["TIMEOUT", "WAITING"]:
+            self.current_state = "TRACKING"
 
     def search_callback(self, msg):
         command = msg.data
+        self.last_msg_time = time.time()  
+        
         if command in ["left", "right"]:
             self.current_state = "SEARCHING"
             self.search_direction = command
             
         elif command == "find":
             if self.current_state == "SEARCHING":
-                # 하드 브레이크 (관성 죽이기)
                 brake_msg = Twist()
                 self.publisher.publish(brake_msg)
                 
                 self.current_distance = self.target_distance  
                 self.target_angle_rad = 0.0                   
+                self.needs_alignment = True  # [핵심] 찾자마자 에임 정렬 모드 ON
                 
             self.current_state = "TRACKING"
             self.search_direction = ""
 
     def scan_callback(self, msg):
-        min_f = float('inf')
-        min_b = float('inf')
-
-        for i, r in enumerate(msg.ranges):
-            if r < 0.05 or r > 10.0 or math.isinf(r) or math.isnan(r):
-                continue
-            angle = msg.angle_min + i * msg.angle_increment
-            angle = math.atan2(math.sin(angle), math.cos(angle))
-            deg = math.degrees(angle)
-
-            # [수정] 라이다 시야각 확대 (정면/후면 모두 ±50도로 넓혀서 대각선 장애물 감지)
-            if -50 <= deg <= 50:
-                min_f = min(min_f, r)
-            elif deg >= 130 or deg <= -130:
-                min_b = min(min_b, r)
-
-        self.min_dist_front = min_f
-        self.min_dist_back = min_b
+        # [신규] 특정 각도를 제한하지 않고 360도 전체에서 가장 가까운 거리를 찾음
+        min_d = float('inf')
+        for r in msg.ranges:
+            if 0.05 < r < 10.0 and not math.isinf(r) and not math.isnan(r):
+                min_d = min(min_d, r)
+        self.min_dist_all = min_d
 
     def log_state_change(self, new_state_str):
         if self.last_state_str != new_state_str:
@@ -107,7 +107,6 @@ class PersonFollower(Node):
             self.last_state_str = new_state_str
 
     def control_loop(self):
-        # 1. 키보드 'q' 감지
         try:
             if select.select([sys.stdin], [], [], 0.0)[0]:
                 char = sys.stdin.read(1)
@@ -121,23 +120,47 @@ class PersonFollower(Node):
         status_text = ""
         current_state_str = self.current_state
 
-        # [모드 A] 탐색 모드 (SEARCHING)
-        if self.current_state == "SEARCHING":
+        if time.time() - self.last_msg_time > 0.5:
+            self.current_state = "TIMEOUT"
+            self.needs_alignment = False  # 신호 끊기면 정렬 모드도 해제
+
+        if self.current_state == "TIMEOUT":
+            current_state_str = "TIMEOUT (No Data)"
+            cmd_msg.linear.x = 0.0
+            cmd_msg.angular.z = 0.0
+            status_text = "NO_DATA"
+
+        elif self.current_state == "SEARCHING":
             current_state_str = f"SEARCHING ({self.search_direction})"
             cmd_msg.linear.x = 0.0
             if self.search_direction == "left":
                 cmd_msg.angular.z = self.search_speed
             elif self.search_direction == "right":
                 cmd_msg.angular.z = -self.search_speed
-            status_text = f"SEARCH ({self.search_direction})"
+            status_text = f"SEARCH"
 
-        # [모드 B] 추종 모드 (TRACKING)
         elif self.current_state == "TRACKING":
-            if self.current_distance <= 0.01:
-                cmd_msg.linear.x = 0.0
+            # 1. 각도 계산 (공통)
+            if abs(self.target_angle_rad) < self.deadband_angular:
                 cmd_msg.angular.z = 0.0
-                status_text = "STANDBY"
-                current_state_str = "STANDBY (Dist 0)"
+            else:
+                raw_angular_vel = self.target_angle_rad * self.kp_angular
+                cmd_msg.angular.z = max(min(raw_angular_vel, self.max_angular_speed), -self.max_angular_speed)
+
+            # 2. [신규] 정렬(Aligning) 모드: 직진을 막고 제자리 회전으로 중앙부터 맞춤
+            if self.needs_alignment:
+                current_state_str = "ALIGNING (Turn First)"
+                status_text = "ALIGNING"
+                cmd_msg.linear.x = 0.0  # 직진 완벽 차단
+                
+                # 정렬 중일 때는 오버슛 방지를 위해 회전 속도를 더 부드럽게 제한 (최대 0.3)
+                cmd_msg.angular.z = max(min(cmd_msg.angular.z, 0.3), -0.3)
+                
+                # 오차가 0.15rad (약 8도) 이내로 들어오면 정렬 완료 판정
+                if abs(self.target_angle_rad) <= 0.15:
+                    self.needs_alignment = False
+                    
+            # 3. 일반 추종 모드: 정상 직진 허용
             else:
                 distance_error = self.current_distance - self.target_distance
                 if abs(distance_error) < self.deadband_linear:
@@ -145,36 +168,23 @@ class PersonFollower(Node):
                 else:
                     raw_linear_vel = distance_error * self.kp_linear
                     cmd_msg.linear.x = max(min(raw_linear_vel, self.max_linear_speed), -self.max_linear_speed)
-
-                if abs(self.target_angle_rad) < self.deadband_angular:
-                    cmd_msg.angular.z = 0.0
-                else:
-                    raw_angular_vel = self.target_angle_rad * self.kp_angular
-                    cmd_msg.angular.z = max(min(raw_angular_vel, self.max_angular_speed), -self.max_angular_speed)
                 status_text = "TRACKING"
-                
-        else:
-            status_text = "WAITING"
 
-        # 3. 라이다 충돌 방지 오버라이드
-        if cmd_msg.linear.x > 0 and self.min_dist_front < self.safe_distance:
+        # [신규] 360도 라이다 충돌 방지: 어느 방향이든 장애물이 너무 가까우면 이동(전/후진)만 차단
+        if cmd_msg.linear.x != 0.0 and self.min_dist_all < self.safe_distance:
             cmd_msg.linear.x = 0.0
-            status_text = "FRONT_BLOCKED"
-        elif cmd_msg.linear.x < 0 and self.min_dist_back < self.safe_distance:
-            cmd_msg.linear.x = 0.0
-            status_text = "BACK_BLOCKED"
+            status_text = "LIDAR_BLOCK"
 
         self.publisher.publish(cmd_msg)
         
-        # 4. 스마트 로깅 (상태 변화 알림 & 0.5초 단위 요약 출력)
         self.log_state_change(current_state_str)
         
         self.log_counter += 1
-        if self.log_counter % 10 == 0:  # 0.05 * 10 = 0.5초마다 출력
+        if self.log_counter % 10 == 0:  
             self.get_logger().info(
-                f'[{status_text:^13}] Dist: {self.current_distance:.2f}m | Vel: {cmd_msg.linear.x:+.2f} | '
+                f'[{status_text:^11}] Dist: {self.current_distance:.2f}m | Vel: {cmd_msg.linear.x:+.2f} | '
                 f'Ang: {self.target_angle_rad:+.2f}rad | AngVel: {cmd_msg.angular.z:+.2f} | '
-                f'Lidar F: {self.min_dist_front:.2f}m B: {self.min_dist_back:.2f}m'
+                f'LiDAR 360\xb0: {self.min_dist_all:.2f}m'
             )
 
     def emergency_stop(self):
