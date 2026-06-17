@@ -72,3 +72,94 @@ angle_rad = (cx_err / 640) * radians(69)
 | `/search_cmd` | std_msgs/String | "left" 또는 "right", "find" | 사람 소실 시 탐색 회전 방향 |
 
 핵심 — **search_cmd는 watchdog(타임아웃 정지)이 반드시 필요**하다는 점을 AGV 엔지니어에게 강조하세요. 이게 없으면 재발견 후에도 회전이 안 멈춥니다.
+
+
+-----------------------------------------------------------------------------------------
+
+
+
+
+
+## /target_cmd 인터페이스 정의 (AGV 엔지니어 전달용)
+
+**토픽:** `/target_cmd`
+**타입:** `geometry_msgs/Twist`
+**흐름:** Orin `follow_node` 발행 → AGV `agv_control_node` 구독 → `/cmd_vel` 변환 발행
+
+`/search_cmd`는 더 이상 사용하지 않습니다. `/target_cmd` 하나로 통합합니다.
+
+---
+
+### 핵심 — linear.z를 "모드 플래그"로 사용
+
+AGV는 먼저 `linear.z` 값으로 모드를 판단한 뒤 동작합니다.
+
+| linear.z | 모드 | linear.x | angular.z | AGV 동작 |
+|----------|------|----------|-----------|---------|
+| **0.0** | 추종 | 사람 거리(m) | 사람 각도(rad) | 거리 유지하며 추종(1m 목표), 각도만큼 회전 |
+| **1.0** | 왼쪽 탐색 | 0.0 | 미사용 | 제자리 좌회전하며 탐색 |
+| **2.0** | 오른쪽 탐색 | 0.0 | 미사용 | 제자리 우회전하며 탐색 |
+| **3.0** | find/정지 | 0.0 | 미사용 | 즉시 정지 (3초간 계속 수신됨) |
+
+---
+
+### 각도 부호 규칙 (추종 모드, linear.z=0.0)
+- `angular.z` 양수 = 사람이 화면 왼쪽 → 좌회전(CCW)
+- `angular.z` 음수 = 사람이 화면 오른쪽 → 우회전(CW)
+- 받은 부호를 그대로 cmd_vel 회전 방향에 사용 가능
+
+---
+
+### 동작 시나리오 (follow_node가 보내는 순서)
+1. 사람 추종 중 → `linear.z=0.0` + 거리·각도 발행
+2. 사람 놓침 → 마지막 본 방향으로 `linear.z=1.0`(왼쪽) 또는 `2.0`(오른쪽) 발행, AGV 제자리 회전
+3. 탐색 중 사람 재발견 → `linear.z=3.0`(find) 발행, **3초 동안 계속** → AGV 정지 유지
+4. 3초 후:
+   - 사람 계속 보임 → `linear.z=0.0`(추종) 복귀
+   - 사람 사라짐 → `linear.z=1.0/2.0`(탐색) 복귀
+
+---
+
+### AGV 처리 의사코드
+
+```python
+def target_callback(self, msg):
+    mode = msg.linear.z
+    cmd = Twist()
+
+    if mode == 0.0:        # 추종
+        dist_err = msg.linear.x - TARGET_DIST   # TARGET_DIST=1.0
+        if abs(dist_err) > DEADBAND:
+            cmd.linear.x = clip(dist_err * KP_LIN, -MAX_LIN, MAX_LIN)
+        if abs(msg.angular.z) > ANG_DEADBAND:
+            cmd.angular.z = clip(msg.angular.z * KP_ANG, -MAX_ANG, MAX_ANG)
+
+    elif mode == 1.0:      # 왼쪽 탐색
+        cmd.angular.z = SEARCH_SPEED     # 양수(좌회전)
+
+    elif mode == 2.0:      # 오른쪽 탐색
+        cmd.angular.z = -SEARCH_SPEED    # 음수(우회전)
+
+    elif mode == 3.0:      # find - 정지
+        cmd.linear.x = 0.0
+        cmd.angular.z = 0.0
+
+    self.cmd_vel_pub.publish(cmd)
+```
+
+---
+
+### 요청 사항
+1. **watchdog** — `/target_cmd`가 0.5초 이상 안 오면 자동 정지(cmd_vel=0). follow_node 종료/통신 끊김 대비.
+2. **탐색 회전 속도**(`SEARCH_SPEED`)는 AGV 쪽에서 설정. 좁은 공간이면 느리게.
+3. find(3.0)는 3초간 계속 발행되니, 받는 동안 정지 유지하면 됩니다.
+
+---
+
+이대로 전달하면 됩니다. AGV 엔지니어가 확인하면 follow_node 코딩으로 넘어가겠습니다.
+
+
+
+
+
+
