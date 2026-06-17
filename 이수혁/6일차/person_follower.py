@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String  
 from rclpy.qos import qos_profile_sensor_data
 import math
 import time
@@ -13,21 +14,24 @@ class PersonFollower(Node):
         
         self.subscription = self.create_subscription(Twist, '/target_cmd', self.target_callback, 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
+        
+        # 제어 명령 퍼블리셔
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        
+        # [수정] 대시보드 로그 전송용 퍼블리셔 이름 변경
+        self.status_pub = self.create_publisher(String, '/AGV_follower_status', 10)
         
         # --- 제어 및 안전 파라미터 ---
         self.target_distance = 1.0   
-        self.safe_distance = 0.45    # [수정] 전방 충돌 방지 여유 거리 확대 (0.35m -> 0.45m)
+        self.safe_distance = 0.45    
         
-        # 선속도 제어 (관성에 의한 충돌 방지)
-        self.kp_linear = 0.4         # [수정] 가속도 완화 (0.5 -> 0.4)
-        self.max_linear_speed = 0.25 # [수정] 최대 추종 속도 대폭 감소 (0.4 -> 0.25)
+        self.kp_linear = 0.4         
+        self.max_linear_speed = 0.25 
         self.deadband_linear = 0.1
         
-        # 각속도 제어 (센터링 시 좌우 진동 방지)
-        self.kp_angular = 0.7        # [수정] 회전 민감도 감소 (1.2 -> 0.7)
-        self.max_angular_speed = 0.5 # [수정] 최대 회전 속도 감소 (0.8 -> 0.5)
-        self.deadband_angular = 0.08 # [수정] 센터 판정 범위 살짝 확대하여 안정화 (0.05 -> 0.08)
+        self.kp_angular = 0.7        
+        self.max_angular_speed = 0.5 
+        self.deadband_angular = 0.08 
         
         self.search_speed = 0.3       
         self.step_angle_deg = 10.0    
@@ -48,7 +52,7 @@ class PersonFollower(Node):
         self.search_direction = 0.0 
         
         self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
-        self.get_logger().info('Person Follower Node (Speed Reduced & Anti-Wobble applied) started!')
+        self.get_logger().info('Person Follower Node (Dashboard Publisher Added) started!')
 
     def scan_callback(self, msg):
         min_f = float('inf')
@@ -63,7 +67,6 @@ class PersonFollower(Node):
             angle = math.atan2(math.sin(angle), math.cos(angle))
             deg = math.degrees(angle)
 
-            # [수정] 전방 감지 범위를 넓혀(-40~40도) 대각선 앞쪽 장애물도 미리 대응
             if -40 <= deg <= 40:
                 min_f = min(min_f, r)
             elif 40 < deg <= 90:
@@ -85,25 +88,19 @@ class PersonFollower(Node):
         cmd_msg = Twist()
         status_text = "🎯 TRACKING"
 
-        # ---------------------------------------------
         # Mode 0.0 : 기존 추종 모드 + 능동 회피
-        # ---------------------------------------------
         if mode == 0.0:
             self.is_searching = False 
             
-            # 라이다 충돌 방지 및 능동 회피
             if self.min_dist_front < self.safe_distance:
                 status_text = "🚨 AVOIDANCE"
-                # 앞이 막혔으므로 천천히 후진
                 cmd_msg.linear.x = -0.15 
                 
-                # 좌/우 공간 중 더 넓은 쪽으로 부드럽게 회전
                 if self.min_dist_left > self.min_dist_right:
                     cmd_msg.angular.z = 0.4  
                 else:
                     cmd_msg.angular.z = -0.4 
             else:
-                # 장애물이 없으면 기존 P 제어 추종 로직 실행
                 distance_error = current_distance - self.target_distance
                 if abs(distance_error) < self.deadband_linear:
                     cmd_msg.linear.x = 0.0
@@ -117,9 +114,7 @@ class PersonFollower(Node):
                     raw_angular_vel = target_angle_rad * self.kp_angular
                     cmd_msg.angular.z = max(min(raw_angular_vel, self.max_angular_speed), -self.max_angular_speed)
 
-        # ---------------------------------------------
         # Mode 1.0 / 2.0 : 탐색 모드
-        # ---------------------------------------------
         elif mode == 1.0 or mode == 2.0:
             status_text = "🔍⬅️ SEARCH_L" if mode == 1.0 else "🔍➡️ SEARCH_R"
             direction = 1.0 if mode == 1.0 else -1.0
@@ -142,9 +137,7 @@ class PersonFollower(Node):
                 cmd_msg.angular.z = 0.0
                 status_text += "_WAIT"
 
-        # ---------------------------------------------
         # Mode 3.0 : 발견 및 정지
-        # ---------------------------------------------
         elif mode == 3.0:
             self.is_searching = False
             cmd_msg.linear.x = 0.0
@@ -167,7 +160,13 @@ class PersonFollower(Node):
             
             log_diff = (now - self.last_log_time).nanoseconds / 1e9
             if log_diff > 0.5:
-                self.get_logger().warn(f'[💀 WATCHDOG] No signal! EMERGENCY STOP. ({time_diff:.2f}s)')
+                warn_str = f'[💀 WATCHDOG] No signal! EMERGENCY STOP. ({time_diff:.2f}s)'
+                self.get_logger().warn(warn_str)
+                
+                status_msg = String()
+                status_msg.data = warn_str
+                self.status_pub.publish(status_msg)
+                
                 self.last_log_time = now
 
     def print_clean_log(self, mode, dist, angle, cmd):
@@ -182,10 +181,21 @@ class PersonFollower(Node):
                 f"Lidar(F/L/R): {self.min_dist_front:.1f}/{self.min_dist_left:.1f}/{self.min_dist_right:.1f}m"
             )
             self.get_logger().info(log_str)
+            
+            status_msg = String()
+            status_msg.data = log_str
+            self.status_pub.publish(status_msg)
+            
             self.last_log_time = now
 
     def emergency_stop(self):
-        self.get_logger().warn('💀 EMERGENCY STOP: Halting all motors...')
+        warn_str = '💀 EMERGENCY STOP: Halting all motors...'
+        self.get_logger().warn(warn_str)
+        
+        status_msg = String()
+        status_msg.data = warn_str
+        self.status_pub.publish(status_msg)
+        
         stop_msg = Twist()
         stop_msg.linear.x = 0.0
         stop_msg.angular.z = 0.0
