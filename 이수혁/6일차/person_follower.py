@@ -17,22 +17,24 @@ class PersonFollower(Node):
         
         # --- 제어 및 안전 파라미터 ---
         self.target_distance = 1.0   
-        self.safe_distance = 0.35    # 전방 충돌 방지 안전 거리 (0.35m)
+        self.safe_distance = 0.45    # [수정] 전방 충돌 방지 여유 거리 확대 (0.35m -> 0.45m)
         
-        self.kp_linear = 0.5
-        self.max_linear_speed = 0.4
+        # 선속도 제어 (관성에 의한 충돌 방지)
+        self.kp_linear = 0.4         # [수정] 가속도 완화 (0.5 -> 0.4)
+        self.max_linear_speed = 0.25 # [수정] 최대 추종 속도 대폭 감소 (0.4 -> 0.25)
         self.deadband_linear = 0.1
         
-        self.kp_angular = 1.2
-        self.max_angular_speed = 0.8
-        self.deadband_angular = 0.05
+        # 각속도 제어 (센터링 시 좌우 진동 방지)
+        self.kp_angular = 0.7        # [수정] 회전 민감도 감소 (1.2 -> 0.7)
+        self.max_angular_speed = 0.5 # [수정] 최대 회전 속도 감소 (0.8 -> 0.5)
+        self.deadband_angular = 0.08 # [수정] 센터 판정 범위 살짝 확대하여 안정화 (0.05 -> 0.08)
         
         self.search_speed = 0.3       
         self.step_angle_deg = 10.0    
         self.step_angle_rad = math.radians(self.step_angle_deg)
         self.search_rotate_duration = self.step_angle_rad / self.search_speed
         
-        # [수정] 라이다 데이터 (후방 제거, 전/좌/우 분리)
+        # 라이다 데이터
         self.min_dist_front = float('inf')
         self.min_dist_left = float('inf')
         self.min_dist_right = float('inf')
@@ -46,7 +48,7 @@ class PersonFollower(Node):
         self.search_direction = 0.0 
         
         self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
-        self.get_logger().info('Person Follower Node (with Active Obstacle Avoidance) started!')
+        self.get_logger().info('Person Follower Node (Speed Reduced & Anti-Wobble applied) started!')
 
     def scan_callback(self, msg):
         min_f = float('inf')
@@ -61,12 +63,12 @@ class PersonFollower(Node):
             angle = math.atan2(math.sin(angle), math.cos(angle))
             deg = math.degrees(angle)
 
-            # 전방(-30~30도), 좌측(30~90도), 우측(-30~-90도) 최소 거리 측정
-            if -30 <= deg <= 30:
+            # [수정] 전방 감지 범위를 넓혀(-40~40도) 대각선 앞쪽 장애물도 미리 대응
+            if -40 <= deg <= 40:
                 min_f = min(min_f, r)
-            elif 30 < deg <= 90:
+            elif 40 < deg <= 90:
                 min_l = min(min_l, r)
-            elif -90 <= deg < -30:
+            elif -90 <= deg < -40:
                 min_r = min(min_r, r)
 
         self.min_dist_front = min_f
@@ -89,17 +91,17 @@ class PersonFollower(Node):
         if mode == 0.0:
             self.is_searching = False 
             
-            # [추가] 라이다 충돌 방지 및 능동 회피 (최우선 적용)
+            # 라이다 충돌 방지 및 능동 회피
             if self.min_dist_front < self.safe_distance:
                 status_text = "🚨 AVOIDANCE"
-                # 앞이 막혔으므로 천천히 후진 (후방 센서 불량 감안, 느린 속도)
+                # 앞이 막혔으므로 천천히 후진
                 cmd_msg.linear.x = -0.15 
                 
-                # 좌/우 공간 중 더 넓은 쪽으로 회전하며 빠져나오기
+                # 좌/우 공간 중 더 넓은 쪽으로 부드럽게 회전
                 if self.min_dist_left > self.min_dist_right:
-                    cmd_msg.angular.z = 0.5  # 좌회전
+                    cmd_msg.angular.z = 0.4  
                 else:
-                    cmd_msg.angular.z = -0.5 # 우회전
+                    cmd_msg.angular.z = -0.4 
             else:
                 # 장애물이 없으면 기존 P 제어 추종 로직 실행
                 distance_error = current_distance - self.target_distance
