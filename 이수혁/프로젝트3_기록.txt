@@ -1,0 +1,86 @@
+
+
+myAGV 2023 Jetson Nano 스마트 4륜 모빌리티 로봇
+
+getsonn orin nano developer kit
+
+realsense Depth Camera D435
+
+mycobot_280pi
+
+---------------------------------------------------------
+sudo reboot
+
+sudo shutdown -h now
+
+AGV 192.168.0.101
+
+로봇 비밀번호: Elephant
+
+
+
+ssh er@192.168.0.101
+Elephant
+------------------------1-----------------------------------
+
+로봇 기본 통신 및 센서 켜기
+ros2 launch myagv_odometry myagv_active.launch.py
+
+
+터미널 2: 내비게이션 실행
+ros2 launch myagv_navigation2 navigation2_active.launch.py map:=/home/er/my_map.yaml
+
+
+
+사람 추종 관련 노드 실행
+python3 ~/person_follower.py
+
+카메라 실행 및 현재 위치 파악 
+ros2 launch vision_localization.launch.py
+
+
+AGV_UI 실행 (ros1에서)
+cd /home/er/AGV_UI
+python3 operations.py
+
+카메라 켜기
+python3 csi_camera_pub.py
+
+(카메라) 뷰어 실행
+ros2 run rqt_image_view rqt_image_view
+
+아르코 마커 기반 현재 위치 탐색
+python3 aruco_localization.py
+
+목적지 이동
+python3 nav2_commander.py
+
+
+fsm 명령 중계기
+python3 agv_task_manager.py
+
+모드1(추종 노드)
+python3 person_follower.py
+
+모드2(안내모드)
+ros2 launch mode2_guide.launch.py
+
+모드3(단순 이동)
+ros2 launch mode3_goto.launch.py
+
+
+
+터미널 3: 자기 위치 탐색
+python3 auto_localization.py // 현재 사용X (아르코 마커 없이 탐색)
+-------------------------------------------------------------------------
+깃허브 주소: 
+https://github.com/stonepbg/p3_project_ws
+-------------------------------------------------------------------------
+<최종 실행 프로그램>
+
+1. 통합 베이스 런치 파일 (하드웨어 활성화 + 네비게이션 및 맵 활성화)
+ros2 launch agv_base_system.launch.py 
+
+
+2. 로컬 태스크 매니저
+python3 agv_task_manager.py
