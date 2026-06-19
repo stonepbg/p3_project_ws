@@ -16,7 +16,7 @@ class Nav2Commander(Node):
         self.mode_sub = self.create_subscription(Int32, '/internal_mode', self.mode_callback, 10)
         self.pause_sub = self.create_subscription(Bool, '/guide_pause', self.pause_callback, 10)
         
-        # 라이다 감시 구독
+        # 라이다 감시 구독 (DDS 신뢰성 설정을 위해 qos_profile_sensor_data 적용)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
         
         self.status_pub = self.create_publisher(Int32, '/AGV_status', 10)
@@ -40,19 +40,21 @@ class Nav2Commander(Node):
         self.goal_handle = None
         self.is_paused = False
         
-        # 능동 안전 설정값 (정면 35cm 기준 적용)
-        self.danger_zone_front = 0.35 
-        self.danger_zone_side = 0.30  # 측면은 로봇 폭을 고려해 30cm로 설정
+        # 축소된 능동 안전 설정값 및 진동 방지 타이머 변수
+        self.danger_zone_front = 0.25   # 정면 25cm
+        self.danger_zone_side = 0.22    # 측면 22cm
         self.is_avoiding = False
+        self.avoidance_start_time = 0.0
+        self.avoidance_duration = 1.0   # 강제 회피 최소 유지 시간 (1초)
         
-        # 도착 보고용 타이머 변수
+        # 자율 종료 보고용 타이머
         self.mission_completed = False
         self.status_timer = self.create_timer(0.5, self.publish_status_loop)
 
-        self.get_logger().info('🗺️ Nav2 커맨더 가동 (정면 35cm 회피 및 자율 종료 보고 탑재)')
+        self.get_logger().info('🗺️ Nav2 자율주행 커맨더 가동 완료 (안전 거리 25cm 및 진동 방지 로직 탑재)')
 
     def publish_status_loop(self):
-        # 매니저가 스스로 런치 파일을 끄기 전까지 1번 신호를 0.5초마다 끈질기게 쏩니다.
+        # 임무가 완료되면 매니저가 노드를 종료할 때까지 0.5초마다 1(도착) 신호를 송신
         if self.mission_completed:
             msg = Int32()
             msg.data = 1
@@ -61,6 +63,13 @@ class Nav2Commander(Node):
     def scan_callback(self, msg):
         if self.current_mode == 0 or self.current_mode == 10 or self.is_paused:
             return
+
+        current_time = time.time()
+
+        # 강제 회피가 발동된 상태라면, 1.5초 동안은 센서 값을 무시하고 후진에 집중하여 제어 충돌을 방지
+        if self.is_avoiding:
+            if current_time - self.avoidance_start_time < self.avoidance_duration:
+                return
 
         min_f = float('inf')
         min_l = float('inf')
@@ -79,24 +88,26 @@ class Nav2Commander(Node):
             elif -90 <= deg < -30:
                 min_r = min(min_r, r)
 
-        # 35cm 이내 위험 감지 시 Nav2 취소 및 직접 회피
+        # 위험 구역 진입 감지 시 회피 기동 시작
         if min_f < self.danger_zone_front or min_l < self.danger_zone_side or min_r < self.danger_zone_side:
             if not self.is_avoiding:
-                self.get_logger().warn(f'🚨 충돌 위험! (정면:{min_f:.2f} 좌:{min_l:.2f} 우:{min_r:.2f}) Nav2를 강제 취소합니다!')
+                self.get_logger().warn(f'🚨 충돌 위험 감지 (정면:{min_f:.2f}m)! Nav2 경로를 취소하고 {self.avoidance_duration}초간 회피합니다.')
                 self.cancel_current_goal()
                 self.is_avoiding = True
+                self.avoidance_start_time = current_time
             
             avoid_cmd = Twist()
-            avoid_cmd.linear.x = -0.15 
+            avoid_cmd.linear.x = -0.12  # 안정적인 후진 속도
             if min_l < min_r:
-                avoid_cmd.angular.z = -0.4 
+                avoid_cmd.angular.z = -0.35 # 왼쪽이 가까우면 우회전
             else:
-                avoid_cmd.angular.z = 0.4  
+                avoid_cmd.angular.z = 0.35  # 오른쪽이 가까우면 좌회전
             self.cmd_vel_pub.publish(avoid_cmd)
 
+        # 회피 지속 시간이 끝났고, 안전거리가 완전히 확보되었을 때 다시 경로 생성
         elif self.is_avoiding and min_f > self.danger_zone_front + 0.15 and min_l > self.danger_zone_side + 0.1 and min_r > self.danger_zone_side + 0.1:
-            self.get_logger().info('✅ 안전 거리 확보 완료. 목적지로 재출발합니다.')
-            self.cmd_vel_pub.publish(Twist())
+            self.get_logger().info('✅ 안전 거리가 충분히 확보되었습니다. 목적지로 재출발합니다.')
+            self.cmd_vel_pub.publish(Twist()) # 일시 정지
             self.is_avoiding = False
             self.send_nav_goal(self.current_target_id)
 
@@ -142,15 +153,22 @@ class Nav2Commander(Node):
             self.get_logger().error(f'❌ 알 수 없는 목적지 ID입니다: {target_id}')
             return
 
-        x, y, yaw = self.marker_database[target_id]
+        x, y, base_yaw = self.marker_database[target_id]
         
+        # 모드 3(이동 모드)일 경우, 목표 지점 도달 각도를 정반대(+180도)로 계산하여 Nav2에 하달
+        target_yaw = base_yaw
+        if 30 <= self.current_mode <= 37:
+            target_yaw = base_yaw + math.pi
+
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = 'map'
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = x
         goal_msg.pose.pose.position.y = y
-        goal_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
-        goal_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        
+        # 쿼터니언 변환 계산 적용
+        goal_msg.pose.pose.orientation.z = math.sin(target_yaw / 2.0)
+        goal_msg.pose.pose.orientation.w = math.cos(target_yaw / 2.0)
 
         self.nav_client.wait_for_server()
         self.send_goal_future = self.nav_client.send_goal_async(goal_msg)
@@ -174,28 +192,9 @@ class Nav2Commander(Node):
     def get_result_callback(self, future):
         status = future.result().status
         if status == 4: # SUCCEEDED
-            self.get_logger().info('🏁 목적지에 안전하게 도착했습니다.')
-            
-            if 30 <= self.current_mode <= 37:
-                self.perform_180_turn()
-            
-            # 도착 성공 상태를 True로 변경하면, 이후 타이머가 알아서 1번 신호를 계속 쏩니다.
+            self.get_logger().info('🏁 목적지에 안전하게 도착 및 정렬 완료했습니다.')
+            # 플래그 활성화를 통해 타이머 루프에서 도착 보고를 시작하도록 유도
             self.mission_completed = True 
-
-    def perform_180_turn(self):
-        self.get_logger().info('🔄 [모드 3] 제자리 180도 회전을 수행합니다.')
-        twist = Twist()
-        twist.angular.z = 0.5 
-        turn_duration = math.pi / 0.5
-        start_time = time.time()
-
-        while time.time() - start_time < turn_duration:
-            self.cmd_vel_pub.publish(twist)
-            time.sleep(0.1)
-
-        twist.angular.z = 0.0
-        self.cmd_vel_pub.publish(twist)
-        self.get_logger().info('✅ 180도 회전 완료.')
 
 def main(args=None):
     rclpy.init(args=args)
