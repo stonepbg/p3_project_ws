@@ -1,0 +1,153 @@
+[follow_node-2] [INFO] [1781847671.973730634] [follow_node]: [ENABLE] follow_enable = False
+[tts_node-4] [INFO] [1781847673.567110342] [tts_node]: [TTS] 재생 완료
+[follow_node-2] [INFO] [1781847718.993247956] [follow_node]: [FIND] 사람 재발견 → 정지
+[follow_node-2] [INFO] [1781847748.716365622] [follow_node]: [FIND] 사람 재발견 → 정지
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[fsm_node-1] sequence size exceeds remaining buffer
+[tts_node-4] sequence size exceeds remaining buffer
+[rear_cam_node-3] sequence size exceeds remaining buffer
+[follow_node-2] sequence size exceeds remaining buffer
+^C[WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+[follow_node-2] [INFO] [1781848736.093607186] [follow_node]: 종료 - 정지 신호 발행
+[follow_node-2] Failed to publish log message to rosout: publisher's context is invalid, at ./src/rcl/publisher.c:389
+[INFO] [tts_node-4]: process has finished cleanly [pid 3739]
+[INFO] [fsm_node-1]: process has finished cleanly [pid 3733]
+[INFO] [rear_cam_node-3]: process has finished cleanly [pid 3737]
+[INFO] [follow_node-2]: process has finished cleanly [pid 3735]
+
+
+
+
+
+
+
+
+
+
+---
+data: 0
+---
+data: 0
+---
+data: 30
+---
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+sequence size exceeds remaining buffer
+data: 23
+---
+data: 0
+---
+data: 0
+---
