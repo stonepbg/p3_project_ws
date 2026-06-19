@@ -10,10 +10,13 @@ class AGVTaskManager(Node):
     def __init__(self):
         super().__init__('agv_task_manager')
         
-        # 1. 외부 FSM이 보내는 모드 구독 (1회성 신호 캐치용)
+        # 1. 외부 FSM이 보내는 모드 구독 (0.5초마다 반복해서 날아옴)
         self.mode_sub = self.create_subscription(Int32, '/agv_mode', self.mode_callback, 10)
         
-        # 2. AGV 내부 노드들에게 현재 모드를 지속적으로 알려줄 퍼블리셔 추가
+        # 2. [신규] 외부 FSM에게 "나 확실히 받았어!"라고 회신(Ack)할 퍼블리셔
+        self.ack_pub = self.create_publisher(Int32, '/AGV_mode_ack', 10)
+        
+        # 3. AGV 내부 노드들에게 현재 모드를 지속적으로 알려줄 퍼블리셔
         self.internal_mode_pub = self.create_publisher(Int32, '/internal_mode', 10)
         
         self.current_mode = 0
@@ -25,7 +28,7 @@ class AGVTaskManager(Node):
         self.get_logger().info('🛠️ AGV 태스크 매니저 가동 완료: 외부 FSM의 명령을 대기합니다.')
 
     def broadcast_current_mode(self):
-        # 켜져 있는 하위 노드들이 언제든 현재 상태를 알 수 있도록 0.5초마다 계속 전송
+        # 켜져 있는 하위 노드들이 언제든 현재 상태를 알 수 있도록 0.5초마다 내부 전송
         msg = Int32()
         msg.data = self.current_mode
         self.internal_mode_pub.publish(msg)
@@ -33,11 +36,20 @@ class AGVTaskManager(Node):
     def mode_callback(self, msg):
         new_mode = msg.data
         
+        # ========================================================
+        # [핵심] FSM으로부터 신호를 받을 때마다 무조건 똑같은 숫자를 회신 (Ack)
+        # ========================================================
+        ack_msg = Int32()
+        ack_msg.data = new_mode
+        self.ack_pub.publish(ack_msg)
+        # (FSM 팀의 요구사항대로, 별도 카운트 없이 받을 때마다 즉시 쏩니다.)
+        
         new_group = self.get_mode_group(new_mode)
         old_group = self.get_mode_group(self.current_mode)
         
         self.current_mode = new_mode
 
+        # 모드 그룹이 바뀌었을 때만 런치 파일을 교체 실행
         if new_group != old_group:
             self.stop_current_process()
             
