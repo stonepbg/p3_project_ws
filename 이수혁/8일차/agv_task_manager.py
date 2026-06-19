@@ -11,6 +11,10 @@ class AGVTaskManager(Node):
         super().__init__('agv_task_manager')
         
         self.mode_sub = self.create_subscription(Int32, '/agv_mode', self.mode_callback, 10)
+        
+        # [핵심 추가] 하위 노드가 임무를 끝냈는지 감시하기 위해 상태 토픽 구독
+        self.status_sub = self.create_subscription(Int32, '/AGV_status', self.status_callback, 10)
+        
         self.ack_pub = self.create_publisher(Int32, '/AGV_mode_ack', 10)
         self.internal_mode_pub = self.create_publisher(Int32, '/internal_mode', 10)
         
@@ -18,20 +22,26 @@ class AGVTaskManager(Node):
         self.active_process = None
         self.broadcast_timer = self.create_timer(0.5, self.broadcast_current_mode)
         
-        self.get_logger().info('🛠️ AGV 태스크 매니저 가동: FSM 명령 대기 및 Ack 시스템 활성화')
+        self.get_logger().info('🛠️ AGV 태스크 매니저 가동: FSM 명령 대기 및 자율 종료 시스템 활성화')
 
     def broadcast_current_mode(self):
         msg = Int32()
         msg.data = self.current_mode
         self.internal_mode_pub.publish(msg)
 
+    def status_callback(self, msg):
+        # [자율 종료 로직] 커맨더가 "도착(1)" 신호를 쏘면 매니저가 스스로 시스템을 종료합니다.
+        if msg.data == 1 and self.current_mode != 0:
+            self.get_logger().info('🏁 [자율 종료] 목적지 도착(1)을 감지했습니다. FSM의 0번 명령 없이 스스로 대기 모드(0)로 전환합니다.')
+            self.current_mode = 0
+            self.broadcast_current_mode() # 0번을 방송해서 하위 노드 브레이크 작동
+            self.stop_current_process()   # 프로세스 종료
+
     def mode_callback(self, msg):
         new_mode = msg.data
         
-        # 🚨 [수신 증거 로그] 이 로그가 안 뜬다면 FSM이 안 쏜 것이거나 통신 단절입니다!
-        self.get_logger().info(f'📥 [수신됨] 외부 FSM으로부터 [{new_mode}]번 명령이 도착했습니다.')
-        
-        # 받자마자 무조건 똑같은 번호로 Ack 회신 (FSM이 송신을 멈추게 함)
+        # FSM 통신망 확인 로그 및 Ack 회신
+        self.get_logger().info(f'📥 [수신됨] 외부 FSM으로부터 [{new_mode}]번 명령 도착')
         ack_msg = Int32()
         ack_msg.data = new_mode
         self.ack_pub.publish(ack_msg)
@@ -40,7 +50,6 @@ class AGVTaskManager(Node):
         old_group = self.get_mode_group(self.current_mode)
         self.current_mode = new_mode
         
-        # 모드가 바뀌면 즉시 내부망에 방송하여 하위 노드들이 브레이크를 밟게 함
         self.broadcast_current_mode()
 
         if new_group != old_group:
@@ -53,7 +62,7 @@ class AGVTaskManager(Node):
             elif new_group == 3:
                 self.start_process(['ros2', 'launch', 'mode3_goto.launch.py'])
             elif new_group == 0:
-                self.get_logger().info('⏹️ 대기 모드: 로봇을 완전히 정지하고 대기합니다.')
+                self.get_logger().info('⏹️ 대기 모드: 강제 정지 명령을 수행합니다.')
 
     def get_mode_group(self, mode):
         if mode == 10: return 1
@@ -70,11 +79,11 @@ class AGVTaskManager(Node):
             self.get_logger().info('🛑 모터 정지 신호 전달을 위해 0.5초 대기...')
             time.sleep(0.5) 
             
-            self.get_logger().info('🛑 기존 프로세스를 안전하게 종료합니다.')
+            self.get_logger().info('🛑 런치 파일을 안전하게 종료합니다.')
             try:
                 os.killpg(os.getpgid(self.active_process.pid), signal.SIGINT)
                 self.active_process.wait(timeout=5.0) 
-                self.get_logger().info('✅ 종료 완료.')
+                self.get_logger().info('✅ 프로세스 종료 완료.')
             except Exception as e:
                 self.get_logger().warn(f'프로세스 종료 중 예외 발생: {e}')
             finally:
