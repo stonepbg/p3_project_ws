@@ -20,7 +20,7 @@ class Nav2Commander(Node):
         self.status_pub = self.create_publisher(Int32, '/AGV_status', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
-        # [신규] 대시보드 퍼블리셔
+        # 대시보드 퍼블리셔
         self.log_pub = self.create_publisher(String, '/AGV_log', 10)
 
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -37,8 +37,9 @@ class Nav2Commander(Node):
         self.goal_handle = None
         self.is_paused = False
         
-        self.danger_zone_front = 0.25
-        self.danger_zone_side = 0.22
+        # [수정됨] 위험 감지 설정 (측면 벽 무시 로직)
+        self.danger_zone_front = 0.25   # 정면 위험 거리 25cm
+        self.danger_zone_corner = 0.20  # 어깨(대각선) 위험 거리 20cm
         self.is_avoiding = False
         self.avoidance_start_time = 0.0
         self.avoidance_duration = 1.5
@@ -46,7 +47,7 @@ class Nav2Commander(Node):
         self.mission_completed = False
         self.status_timer = self.create_timer(0.5, self.publish_status_loop)
 
-        self.get_logger().info('🗺️ Nav2 커맨더 가동 완료')
+        self.get_logger().info('🗺️ Nav2 커맨더 가동 완료 (직진 시 측면 벽 무시 로직 적용)')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -75,13 +76,15 @@ class Nav2Commander(Node):
             if r < 0.05 or r > 10.0 or math.isinf(r) or math.isnan(r): continue
             angle = msg.angle_min + i * msg.angle_increment
             deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
-            if -30 <= deg <= 30: min_f = min(min_f, r)
-            elif 30 < deg <= 90: min_l = min(min_l, r)
-            elif -90 <= deg < -30: min_r = min(min_r, r)
+            
+            # [수정됨] 핵심 변경점: 55도~90도(순수 측면 벽)는 무시하고, 정면과 대각선 어깨만 감시
+            if -25 <= deg <= 25: min_f = min(min_f, r)
+            elif 25 < deg <= 55: min_l = min(min_l, r)
+            elif -55 <= deg < -25: min_r = min(min_r, r)
 
         # 1. 구역 판별: 위험한가? 완전히 안전한가?
-        is_danger = (min_f < self.danger_zone_front or min_l < self.danger_zone_side or min_r < self.danger_zone_side)
-        is_safe = (min_f > self.danger_zone_front + 0.15 and min_l > self.danger_zone_side + 0.1 and min_r > self.danger_zone_side + 0.1)
+        is_danger = (min_f < self.danger_zone_front or min_l < self.danger_zone_corner or min_r < self.danger_zone_corner)
+        is_safe = (min_f > self.danger_zone_front + 0.15 and min_l > self.danger_zone_corner + 0.1 and min_r > self.danger_zone_corner + 0.1)
 
         # 2. 평상시 주행 중 -> 위험 감지 시 회피 모드 진입
         if not self.is_avoiding:
@@ -91,24 +94,24 @@ class Nav2Commander(Node):
                 self.is_avoiding = True
                 self.avoidance_start_time = current_time
         
-        # 3. 회피 모드 동작 로직 (수정된 핵심 부분)
+        # 3. 회피 모드 동작 로직 (림보 현상 방지)
         else:
             elapsed = current_time - self.avoidance_start_time
             
             # 지정된 시간(1.5초)이 지났고, 거리가 '완전히' 확보되었을 때만 탈출
             if elapsed > self.avoidance_duration and is_safe:
-                self.send_log('✅ 안전 거리 확보. 목적지로 재출발합니다.')
+                self.send_log('✅ 안전 공간 확보. 목적지로 재출발합니다.')
                 self.cmd_vel_pub.publish(Twist()) # 정지 명령으로 모터 안정화
                 self.is_avoiding = False
                 self.send_nav_goal(self.current_target_id)
             
-            # 시간이 덜 지났거나, 여전히 거리가 애매하다면 멈추지 않고 계속 후진!
+            # 시간이 덜 지났거나 여전히 거리가 애매하다면 계속 후진
             else:
                 avoid_cmd = Twist()
                 avoid_cmd.linear.x = -0.12
                 if min_l < min_r: avoid_cmd.angular.z = -0.35
                 else: avoid_cmd.angular.z = 0.35
-                self.cmd_vel_pub.publish(avoid_cmd) # 모터 타임아웃 방지를 위해 지속 발행
+                self.cmd_vel_pub.publish(avoid_cmd)
 
     def mode_callback(self, msg):
         mode = msg.data
