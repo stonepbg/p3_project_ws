@@ -1,3 +1,16 @@
+
+follow_node에 /agv_mode(Int32) 구독 추가 → 안내모드(raw//10==2) 인지
+on_agv_mode 콜백 추가 (모드 전환 시 추종 정지)
+loop()에 안내모드 분기 삽입 → person predict 결과로 후방 사람 판단 → /rear_person(Bool) 발행
+global 중복 선언 SyntaxError 디버깅, PYTHONPATH 문제 해결
+빌드 성공 + follow_node 기동까지 확인
+
+
+
+
+-------------------------------------------------------------------------------------
+
+
 AGV 엔지니어에게 전달할 내용입니다.
 AGV 엔지니어 전달 사항 — 모드 전달 핸드셰이크
 배경
