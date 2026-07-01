@@ -36,6 +36,9 @@ class PersonFollower(Node):
         self.min_dist_left = float('inf')
         self.min_dist_right = float('inf')
         
+        # [신규] 타겟을 놓쳤을 때 찾기 위해 마지막 각도를 기억하는 변수
+        self.last_known_angle = 0.0 
+        
         self.last_msg_time = self.get_clock().now()
         self.last_log_time = self.get_clock().now()
         self.current_mode_text = "🟢 INIT"
@@ -45,11 +48,12 @@ class PersonFollower(Node):
         self.search_direction = 0.0 
         
         self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
-        self.get_logger().info('Person Follower Node (10번/50번 호환) started!')
+        self.get_logger().info('Person Follower Node (스마트 탐색 및 모드별 라이다 분리 적용) started!')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
         elif level == 'warn': self.get_logger().warn(text)
+        elif level == 'error': self.get_logger().error(text)
         
         msg = String()
         msg.data = f"[추종/유도] {text}"
@@ -59,7 +63,6 @@ class PersonFollower(Node):
         prev_mode = self.current_agv_mode
         self.current_agv_mode = msg.data
 
-        # 10번: 1.0m 유지, 45cm 위험 브레이크
         if self.current_agv_mode == 10 and prev_mode != 10:
             self.target_distance = 1.0
             self.safe_distance = 0.45
@@ -68,7 +71,6 @@ class PersonFollower(Node):
             self.last_msg_time = now
             self.last_log_time = now
             
-        # [신규] 50번: 30cm 유지, 20cm 위험 브레이크
         elif self.current_agv_mode == 50 and prev_mode != 50:
             self.target_distance = 0.30  
             self.safe_distance = 0.20    
@@ -82,7 +84,6 @@ class PersonFollower(Node):
             self.emergency_stop()
 
     def scan_callback(self, msg):
-        # 10번 또는 50번이 아니면 라이다 연산 안 함
         if self.current_agv_mode not in [10, 50]: return
         
         min_f, min_l, min_r = float('inf'), float('inf'), float('inf')
@@ -92,9 +93,17 @@ class PersonFollower(Node):
             angle = msg.angle_min + i * msg.angle_increment
             deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
 
-            if -40 <= deg <= 40: min_f = min(min_f, r)
-            elif 40 < deg <= 90: min_l = min(min_l, r)
-            elif -90 <= deg < -40: min_r = min(min_r, r)
+            # [핵심] 10번 모드와 50번 모드의 라이다 시야각 분리
+            if self.current_agv_mode == 10:
+                # 일반 추종: 넓은 시야 (전방 ±40도)
+                if -40 <= deg <= 40: min_f = min(min_f, r)
+                elif 40 < deg <= 90: min_l = min(min_l, r)
+                elif -90 <= deg < -40: min_r = min(min_r, r)
+            elif self.current_agv_mode == 50:
+                # 픽업 유도: 좁은 시야 (전방 ±20도) - 주변 사물 오인 방지
+                if -20 <= deg <= 20: min_f = min(min_f, r)
+                elif 20 < deg <= 60: min_l = min(min_l, r)
+                elif -60 <= deg < -20: min_r = min(min_r, r)
 
         self.min_dist_front, self.min_dist_left, self.min_dist_right = min_f, min_l, min_r
 
@@ -110,8 +119,10 @@ class PersonFollower(Node):
         status_text = f"🎯 TRACKING ({int(self.target_distance*100)}cm)"
 
         if mode == 0.0:
+            # 타겟을 보고 있을 때 마지막 각도를 지속적으로 기억
+            self.last_known_angle = target_angle_rad 
             self.is_searching = False 
-            # 동적으로 변경된 safe_distance(10번: 45cm, 50번: 20cm) 적용
+            
             if self.min_dist_front < self.safe_distance:
                 status_text = "🚨 AVOIDANCE"
                 cmd_msg.linear.x = -0.15 
@@ -143,8 +154,11 @@ class PersonFollower(Node):
                 status_text += "_WAIT"
 
         elif mode == 3.0:
-            self.is_searching = False
-            status_text = "🛑 FIND_STOP"
+            # FSM에서 3.0(놓침)을 명시적으로 보내올 경우 자율 탐색 시작
+            self.is_searching = True
+            direction = 1.0 if self.last_known_angle >= 0 else -1.0
+            cmd_msg.angular.z = direction * self.search_speed
+            status_text = "🔍⬅️ AUTO_SEARCH" if direction > 0 else "🔍➡️ AUTO_SEARCH"
 
         self.publisher.publish(cmd_msg)
         self.current_mode_text = status_text
@@ -155,10 +169,23 @@ class PersonFollower(Node):
         now = self.get_clock().now()
         time_diff = (now - self.last_msg_time).nanoseconds / 1e9
         
-        if time_diff > 0.5:
+        # [신규] 신호가 끊겼을 때 (0.5초 ~ 5.0초 사이) -> 즉시 정지하지 않고 마지막 위치로 회전 탐색
+        if 0.5 < time_diff < 5.0:
+            cmd_msg = Twist()
+            direction = 1.0 if self.last_known_angle >= 0 else -1.0
+            cmd_msg.angular.z = direction * self.search_speed
+            self.publisher.publish(cmd_msg)
+            
+            if (now - self.last_log_time).nanoseconds / 1e9 > 1.0:
+                dir_str = "좌측" if direction > 0 else "우측"
+                self.send_log(f'⚠️ 대상 유실! 마지막 위치({dir_str})로 회전하며 탐색합니다. ({time_diff:.1f}s)', 'warn')
+                self.last_log_time = now
+                
+        # 5초 이상 회전해도 못 찾으면 포기하고 정지
+        elif time_diff >= 5.0:
             self.emergency_stop() 
-            if (now - self.last_log_time).nanoseconds / 1e9 > 0.5:
-                self.send_log(f'💀 [WATCHDOG] 신호 유실! 즉시 브레이크 작동. ({time_diff:.2f}s)', 'warn')
+            if (now - self.last_log_time).nanoseconds / 1e9 > 2.0:
+                self.send_log('💀 5초 이상 대상 유실. 탐색을 포기하고 대기합니다.', 'error')
                 self.last_log_time = now
 
     def print_clean_log(self, dist, angle):
