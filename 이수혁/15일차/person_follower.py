@@ -36,7 +36,6 @@ class PersonFollower(Node):
         self.min_dist_left = float('inf')
         self.min_dist_right = float('inf')
         
-        # [신규] 타겟을 놓쳤을 때 찾기 위해 마지막 각도를 기억하는 변수
         self.last_known_angle = 0.0 
         
         self.last_msg_time = self.get_clock().now()
@@ -47,8 +46,15 @@ class PersonFollower(Node):
         self.search_start_time = 0.0
         self.search_direction = 0.0 
         
+        # [신규] 2바퀴 분할 탐색을 위한 상태 변수
+        self.is_auto_searching = False
+        self.auto_search_step = 0
+        self.auto_search_phase = 'TURN'
+        self.auto_search_phase_time = 0.0
+        self.auto_search_direction = 1.0
+        
         self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
-        self.get_logger().info('Person Follower Node (스마트 탐색 및 모드별 라이다 분리 적용) started!')
+        self.get_logger().info('Person Follower Node (2바퀴 분할 탐색 및 안정성 향상) started!')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -66,21 +72,20 @@ class PersonFollower(Node):
         if self.current_agv_mode == 10 and prev_mode != 10:
             self.target_distance = 1.0
             self.safe_distance = 0.45
+            self.is_auto_searching = False
             self.send_log('▶️ 10번 모드 진입: 1.0m 간격 사람 추종을 시작합니다.')
-            now = self.get_clock().now()
-            self.last_msg_time = now
-            self.last_log_time = now
+            self.last_msg_time = self.get_clock().now()
             
         elif self.current_agv_mode == 50 and prev_mode != 50:
             self.target_distance = 0.30  
             self.safe_distance = 0.20    
+            self.is_auto_searching = False
             self.send_log('▶️ 50번 모드 진입: 30cm 근접 픽업 유도를 시작합니다.')
-            now = self.get_clock().now()
-            self.last_msg_time = now
-            self.last_log_time = now
+            self.last_msg_time = self.get_clock().now()
             
         elif prev_mode in [10, 50] and self.current_agv_mode not in [10, 50]:
             self.send_log('⏹️ 추종/유도 모드 해제: 즉시 브레이크를 작동합니다.')
+            self.is_auto_searching = False
             self.emergency_stop()
 
     def scan_callback(self, msg):
@@ -93,14 +98,11 @@ class PersonFollower(Node):
             angle = msg.angle_min + i * msg.angle_increment
             deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
 
-            # [핵심] 10번 모드와 50번 모드의 라이다 시야각 분리
             if self.current_agv_mode == 10:
-                # 일반 추종: 넓은 시야 (전방 ±40도)
                 if -40 <= deg <= 40: min_f = min(min_f, r)
                 elif 40 < deg <= 90: min_l = min(min_l, r)
                 elif -90 <= deg < -40: min_r = min(min_r, r)
             elif self.current_agv_mode == 50:
-                # 픽업 유도: 좁은 시야 (전방 ±20도) - 주변 사물 오인 방지
                 if -20 <= deg <= 20: min_f = min(min_f, r)
                 elif 20 < deg <= 60: min_l = min(min_l, r)
                 elif -60 <= deg < -20: min_r = min(min_r, r)
@@ -109,6 +111,12 @@ class PersonFollower(Node):
 
     def target_callback(self, msg):
         if self.current_agv_mode not in [10, 50]: return
+        
+        # 타겟을 다시 찾았다면 탐색 모드 즉시 해제
+        if self.is_auto_searching:
+            self.send_log('✅ 대상을 다시 발견했습니다! 유도를 재개합니다.')
+            self.is_auto_searching = False
+            
         self.last_msg_time = self.get_clock().now()
         
         mode = msg.linear.z
@@ -119,7 +127,6 @@ class PersonFollower(Node):
         status_text = f"🎯 TRACKING ({int(self.target_distance*100)}cm)"
 
         if mode == 0.0:
-            # 타겟을 보고 있을 때 마지막 각도를 지속적으로 기억
             self.last_known_angle = target_angle_rad 
             self.is_searching = False 
             
@@ -153,40 +160,58 @@ class PersonFollower(Node):
             else:
                 status_text += "_WAIT"
 
-        elif mode == 3.0:
-            # FSM에서 3.0(놓침)을 명시적으로 보내올 경우 자율 탐색 시작
-            self.is_searching = True
-            direction = 1.0 if self.last_known_angle >= 0 else -1.0
-            cmd_msg.angular.z = direction * self.search_speed
-            status_text = "🔍⬅️ AUTO_SEARCH" if direction > 0 else "🔍➡️ AUTO_SEARCH"
-
         self.publisher.publish(cmd_msg)
         self.current_mode_text = status_text
         self.print_clean_log(current_distance, target_angle_rad)
 
     def watchdog_check(self):
         if self.current_agv_mode not in [10, 50]: return
-        now = self.get_clock().now()
-        time_diff = (now - self.last_msg_time).nanoseconds / 1e9
         
-        # [신규] 신호가 끊겼을 때 (0.5초 ~ 5.0초 사이) -> 즉시 정지하지 않고 마지막 위치로 회전 탐색
-        if 0.5 < time_diff < 5.0:
-            cmd_msg = Twist()
-            direction = 1.0 if self.last_known_angle >= 0 else -1.0
-            cmd_msg.angular.z = direction * self.search_speed
-            self.publisher.publish(cmd_msg)
-            
-            if (now - self.last_log_time).nanoseconds / 1e9 > 1.0:
-                dir_str = "좌측" if direction > 0 else "우측"
-                self.send_log(f'⚠️ 대상 유실! 마지막 위치({dir_str})로 회전하며 탐색합니다. ({time_diff:.1f}s)', 'warn')
-                self.last_log_time = now
+        now_time = self.get_clock().now()
+        time_diff = (now_time - self.last_msg_time).nanoseconds / 1e9
+        
+        # 1.0초 이상 신호가 끊겼을 때 (레이저 유실)
+        if time_diff > 1.0:
+            if not self.is_auto_searching:
+                self.is_auto_searching = True
+                self.auto_search_step = 0
+                self.auto_search_phase = 'TURN'
+                self.auto_search_phase_time = time.time()
+                self.auto_search_direction = 1.0 if self.last_known_angle >= 0 else -1.0
                 
-        # 5초 이상 회전해도 못 찾으면 포기하고 정지
-        elif time_diff >= 5.0:
-            self.emergency_stop() 
-            if (now - self.last_log_time).nanoseconds / 1e9 > 2.0:
-                self.send_log('💀 5초 이상 대상 유실. 탐색을 포기하고 대기합니다.', 'error')
-                self.last_log_time = now
+                dir_str = "좌측" if self.auto_search_direction > 0 else "우측"
+                self.send_log(f'⚠️ 대상 유실! 마지막 위치({dir_str}) 방향으로 10도씩 2바퀴 탐색을 시작합니다.', 'warn')
+
+            # 72번 반복하면 720도(2바퀴)
+            if self.is_auto_searching:
+                if self.auto_search_step < 72: 
+                    cmd_msg = Twist()
+                    current_sys_time = time.time()
+                    phase_elapsed = current_sys_time - self.auto_search_phase_time
+
+                    if self.auto_search_phase == 'TURN':
+                        if phase_elapsed < self.search_rotate_duration:
+                            cmd_msg.angular.z = self.auto_search_direction * self.search_speed
+                        else:
+                            self.auto_search_phase = 'STOP'
+                            self.auto_search_phase_time = current_sys_time
+                            
+                    elif self.auto_search_phase == 'STOP':
+                        if phase_elapsed < 0.5:
+                            cmd_msg.angular.z = 0.0
+                        else:
+                            self.auto_search_step += 1
+                            self.auto_search_phase = 'TURN'
+                            self.auto_search_phase_time = current_sys_time
+
+                    self.publisher.publish(cmd_msg)
+                    
+                else:
+                    # 2바퀴를 다 돌았는데도 못 찾은 경우
+                    self.emergency_stop()
+                    if (now_time - self.last_log_time).nanoseconds / 1e9 > 5.0:
+                        self.send_log('💀 2바퀴 탐색 실패. 대기 모드로 전환을 권장합니다.', 'error')
+                        self.last_log_time = now_time
 
     def print_clean_log(self, dist, angle):
         now = self.get_clock().now()
