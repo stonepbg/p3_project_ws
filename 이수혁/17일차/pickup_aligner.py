@@ -30,7 +30,7 @@ class PickupAligner(Node):
         
         self.last_log_time = time.time()
         
-        self.get_logger().info('🧩 픽업 정밀 밀착 노드 가동 (라이다 180도 위상 보정 및 15cm 절대 정지 적용)')
+        self.get_logger().info('🧩 픽업 밀착 노드 가동 (원상 복구 완료 / 물리적 전방 15cm 정지 적용)')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -85,23 +85,16 @@ class PickupAligner(Node):
             
             for i, r in enumerate(msg.ranges):
                 if r < 0.05 or r > 8.0 or math.isinf(r) or math.isnan(r): continue
-                
-                # 센서의 순수 각도 계산
                 angle = msg.angle_min + i * msg.angle_increment
-                raw_deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
+                deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
                 
-                # 라이다의 0도가 로봇 뒤통수를 향하고 있으므로 180도 위상 보정
-                real_front_deg = raw_deg + 180.0
-                if real_front_deg > 180.0:
-                    real_front_deg -= 360.0
-                
-                # real_front_deg 기준 0도가 '진짜 앞 범퍼 방향'
-                if -40 <= real_front_deg <= 40: 
+                # [핵심 수정] 물리적 전방(코드상 180도 및 -180도 부근)을 정지용으로 확인
+                if deg >= 155 or deg <= -155: 
                     min_stop_dist = min(min_stop_dist, r)
                     
-                # 평행 정렬용 (정중앙을 피해 좌우측 시야 사용)
-                if 15 <= real_front_deg <= 45: min_l = min(min_l, r)
-                elif -45 <= real_front_deg <= -15: min_r = min(min_r, r)
+                # [원상 복구] 평행 정렬용 (기존에 잘 작동하던 코드 그대로 유지)
+                if 15 <= deg <= 45: min_l = min(min_l, r)
+                elif -45 <= deg <= -15: min_r = min(min_r, r)
                 
             if math.isinf(min_stop_dist): min_stop_dist = 9.99
             if math.isinf(min_l): min_l = 9.99
@@ -112,21 +105,21 @@ class PickupAligner(Node):
                 diff = min_l - min_r
             
             if current_time - self.last_log_time > 0.5:
-                self.send_log(f'🔍 [진짜 정면] 정지거리: {min_stop_dist:.2f}m | 좌: {min_l:.2f}m | 우: {min_r:.2f}m | 평행오차: {abs(diff):.2f}m')
+                self.send_log(f'🔍 [라이다] 정지최단거리: {min_stop_dist:.2f}m | 좌: {min_l:.2f}m | 우: {min_r:.2f}m | 평행오차: {abs(diff):.2f}m')
                 self.last_log_time = current_time
             
             # ----------------------------------------------------
-            # 제어 로직 (라이다 15cm 정지 절대 0순위)
+            # 제어 로직 (평행 맞추기 -> 전진 -> 물리적 전방 기준 정지)
             # ----------------------------------------------------
             
-            # [0순위] 진짜 정면 거리가 15cm(0.15m) 이하가 되면 즉각 종료
+            # [1순위] 정지거리가 15cm(0.15m) 이하가 되면 무조건 즉시 종료
             if min_stop_dist <= 0.15:
                 twist.linear.x = 0.0
                 twist.linear.y = 0.0
                 twist.angular.z = 0.0
                 self.cmd_vel_pub.publish(twist)
                 
-                self.send_log('✅ 라이다 기준 딱 15cm 정밀 밀착 완료! 즉시 멈추고 1번 신호를 발송합니다.')
+                self.send_log('✅ 타겟 도달 완료! 즉시 멈추고 1번 신호를 발송합니다.')
                 for _ in range(3):
                     status_msg = Int32()
                     status_msg.data = 1
@@ -135,12 +128,12 @@ class PickupAligner(Node):
                 self.state = 'DONE'
                 return
                 
-            # [1순위] 각도가 2.5cm 이상 틀어져 있으면 직진 멈추고 제자리 회전
+            # [2순위] 각도가 2.5cm 이상 틀어져 있으면 직진 멈추고 제자리 회전
             elif abs(diff) > 0.025 and min_l != 9.99 and min_r != 9.99:
                 twist.linear.x = 0.0  
                 twist.angular.z = 0.15 if diff > 0 else -0.15
                 
-            # [2순위] 15cm에 도달하지 않았고 각도도 맞았다면 전진
+            # [3순위] 각도가 맞았으면 전진
             else:
                 twist.angular.z = 0.0  
                 twist.linear.x = 0.05  
