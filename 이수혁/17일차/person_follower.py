@@ -44,17 +44,16 @@ class PersonFollower(Node):
         
         self.current_mode_text = "🟢 INIT"
         
+        # 탐색 공통 상태 변수
         self.is_searching = False
         self.search_start_time = 0.0
         self.search_direction = 0.0 
         
         self.is_auto_searching = False
-        self.auto_search_phase = 'TURN'
-        self.auto_search_phase_time = 0.0
         self.auto_search_direction = 1.0
         
         self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
-        self.get_logger().info('Person Follower Node (초기 3초 대기 및 무한 탐색 적용) started!')
+        self.get_logger().info('Person Follower Node (초기 7초 대기 및 0.5초 정밀 끊어치기 무한 탐색) started!')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -83,7 +82,7 @@ class PersonFollower(Node):
             self.is_auto_searching = False
             self.last_msg_time = self.get_clock().now()
             self.mode_start_time = self.get_clock().now()
-            self.send_log('▶️ 50번 모드 진입: 3초간 타겟 대기 후 픽업 유도를 시작합니다.')
+            self.send_log('▶️ 50번 모드 진입: 7초간 타겟 대기 후 픽업 유도를 시작합니다.')
             
         elif prev_mode in [10, 50] and self.current_agv_mode not in [10, 50]:
             self.send_log('⏹️ 추종/유도 모드 해제: 즉시 브레이크를 작동합니다.')
@@ -122,7 +121,7 @@ class PersonFollower(Node):
         current_distance = msg.linear.x
         target_angle_rad = msg.angular.z
         
-        # [핵심 수정] 0.0 깡통 데이터 필터링 조건 추가
+        # 0.0 깡통 데이터 필터링 조건
         is_invalid_data = (mode == 0.0 and current_distance <= 0.01)
 
         if not is_invalid_data:
@@ -152,10 +151,13 @@ class PersonFollower(Node):
                     if abs(target_angle_rad) < self.deadband_angular: cmd_msg.angular.z = 0.0
                     else: cmd_msg.angular.z = max(min(target_angle_rad * self.kp_angular, self.max_angular_speed), -self.max_angular_speed)
 
+            # 비전 보드 매뉴얼 탐색 로직 (원상 복구)
             elif mode == 1.0 or mode == 2.0:
                 status_text = "🔍⬅️ SEARCH_L" if mode == 1.0 else "🔍➡️ SEARCH_R"
                 direction = 1.0 if mode == 1.0 else -1.0
                 current_time = time.time()
+                
+                # 완벽하게 동작하던 0.5초 정지 시간
                 total_step_duration = self.search_rotate_duration + 0.5 
                 
                 if not self.is_searching or (current_time - self.search_start_time > total_step_duration):
@@ -167,6 +169,7 @@ class PersonFollower(Node):
                     cmd_msg.angular.z = self.search_direction * self.search_speed
                     status_text += "_ROT"
                 else:
+                    cmd_msg.angular.z = 0.0 # 명시적 0명령 하달
                     status_text += "_WAIT"
 
             self.publisher.publish(cmd_msg)
@@ -174,15 +177,14 @@ class PersonFollower(Node):
             self.print_clean_log(current_distance, target_angle_rad)
             
         else:
-            # 깡통 데이터 수신 시 처리
             if not self.is_auto_searching:
                 cmd_msg = Twist()
                 self.publisher.publish(cmd_msg)
                 
                 now_time = self.get_clock().now()
                 time_since_start = (now_time - self.mode_start_time).nanoseconds / 1e9
-                if self.current_agv_mode == 50 and time_since_start < 3.0:
-                    self.current_mode_text = f"⏳ INITIAL_WAIT ({3.0 - time_since_start:.1f}s)"
+                if self.current_agv_mode == 50 and time_since_start < 7.0:
+                    self.current_mode_text = f"⏳ INITIAL_WAIT ({7.0 - time_since_start:.1f}s)"
                 else:
                     self.current_mode_text = "⚠️ TARGET_LOST (데이터 없음)"
                     
@@ -195,12 +197,13 @@ class PersonFollower(Node):
         time_diff = (now_time - self.last_msg_time).nanoseconds / 1e9
         time_since_start = (now_time - self.mode_start_time).nanoseconds / 1e9
         
-        if self.current_agv_mode == 50 and time_since_start < 3.0:
+        # 50번 모드 진입 시 초기 7초만 대기
+        if self.current_agv_mode == 50 and time_since_start < 7.0:
             if time_diff > 1.0: 
                 cmd_msg = Twist()
                 self.publisher.publish(cmd_msg)
                 if (now_time - self.last_log_time).nanoseconds / 1e9 >= 0.5:
-                    self.current_mode_text = f"⏳ INITIAL_WAIT ({3.0 - time_since_start:.1f}s)"
+                    self.current_mode_text = f"⏳ INITIAL_WAIT ({7.0 - time_since_start:.1f}s)"
                     log_str = f"[{self.current_mode_text}] 신호 대기 중... | Lidar: {self.min_dist_front:.1f}m"
                     self.send_log(log_str)
                     self.last_log_time = now_time
@@ -209,9 +212,10 @@ class PersonFollower(Node):
         if time_diff > 1.0:
             if not self.is_auto_searching:
                 self.is_auto_searching = True
-                self.auto_search_phase = 'TURN'
-                self.auto_search_phase_time = time.time()
                 self.auto_search_direction = 1.0 if self.last_known_angle >= 0 else -1.0
+                
+                # [버그 수정] 오류 많던 상태머신 폐기. 가장 완벽히 작동하던 시간 누적 방식으로 통일
+                self.search_start_time = time.time()
                 
                 dir_str = "좌측" if self.auto_search_direction > 0 else "우측"
                 self.send_log(f'⚠️ 대상 유실! 대상을 다시 찾을 때까지 마지막 위치({dir_str}) 방향으로 무한 탐색을 시작합니다.', 'warn')
@@ -219,21 +223,18 @@ class PersonFollower(Node):
             if self.is_auto_searching:
                 cmd_msg = Twist()
                 current_sys_time = time.time()
-                phase_elapsed = current_sys_time - self.auto_search_phase_time
+                total_step_duration = self.search_rotate_duration + 0.5
 
-                if self.auto_search_phase == 'TURN':
-                    if phase_elapsed < self.search_rotate_duration:
-                        cmd_msg.angular.z = self.auto_search_direction * self.search_speed
-                    else:
-                        self.auto_search_phase = 'STOP'
-                        self.auto_search_phase_time = current_sys_time
-                        
-                elif self.auto_search_phase == 'STOP':
-                    if phase_elapsed < 0.5:
-                        cmd_msg.angular.z = 0.0
-                    else:
-                        self.auto_search_phase = 'TURN'
-                        self.auto_search_phase_time = current_sys_time
+                # 1 사이클(회전 + 0.5초 정지)이 끝나면 시간 초기화하여 다음 10도 회전 준비
+                if current_sys_time - self.search_start_time > total_step_duration:
+                    self.search_start_time = current_sys_time
+
+                # 회전 구간 (약 0 ~ 0.58초)
+                if current_sys_time - self.search_start_time < self.search_rotate_duration:
+                    cmd_msg.angular.z = self.auto_search_direction * self.search_speed
+                # 정지 구간 (약 0.58초 ~ 1.08초)
+                else:
+                    cmd_msg.angular.z = 0.0 # 확실하게 힘을 0으로 줍니다.
 
                 self.publisher.publish(cmd_msg)
 
