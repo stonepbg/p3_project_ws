@@ -40,7 +40,7 @@ class PersonFollower(Node):
         
         self.last_msg_time = self.get_clock().now()
         self.last_log_time = self.get_clock().now()
-        self.mode_start_time = self.get_clock().now() # [신규] 모드 시작 시간 기록용
+        self.mode_start_time = self.get_clock().now()
         
         self.current_mode_text = "🟢 INIT"
         
@@ -122,6 +122,7 @@ class PersonFollower(Node):
         current_distance = msg.linear.x
         target_angle_rad = msg.angular.z
         
+        # [핵심 수정] 0.0 깡통 데이터 필터링 조건 추가
         is_invalid_data = (mode == 0.0 and current_distance <= 0.01)
 
         if not is_invalid_data:
@@ -173,11 +174,11 @@ class PersonFollower(Node):
             self.print_clean_log(current_distance, target_angle_rad)
             
         else:
+            # 깡통 데이터 수신 시 처리
             if not self.is_auto_searching:
                 cmd_msg = Twist()
                 self.publisher.publish(cmd_msg)
                 
-                # [신규] 3초 유예 기간 중 깡통 데이터가 들어올 때의 로그 처리
                 now_time = self.get_clock().now()
                 time_since_start = (now_time - self.mode_start_time).nanoseconds / 1e9
                 if self.current_agv_mode == 50 and time_since_start < 3.0:
@@ -194,7 +195,6 @@ class PersonFollower(Node):
         time_diff = (now_time - self.last_msg_time).nanoseconds / 1e9
         time_since_start = (now_time - self.mode_start_time).nanoseconds / 1e9
         
-        # [신규] 50번 모드 진입 직후 3초 동안은 신호가 완전히 끊겨도 무조건 탐색 보류 (대기)
         if self.current_agv_mode == 50 and time_since_start < 3.0:
             if time_diff > 1.0: 
                 cmd_msg = Twist()
@@ -204,9 +204,8 @@ class PersonFollower(Node):
                     log_str = f"[{self.current_mode_text}] 신호 대기 중... | Lidar: {self.min_dist_front:.1f}m"
                     self.send_log(log_str)
                     self.last_log_time = now_time
-            return # 3초가 되기 전에는 아래의 무한 탐색 로직으로 넘어가지 않음
+            return 
             
-        # 신호가 완전히 끊겼거나, 깡통 데이터만 1초 이상 들어온 경우 탐색 시작
         if time_diff > 1.0:
             if not self.is_auto_searching:
                 self.is_auto_searching = True
