@@ -44,7 +44,6 @@ class PersonFollower(Node):
         
         self.current_mode_text = "🟢 INIT"
         
-        # 탐색 공통 상태 변수
         self.is_searching = False
         self.search_start_time = 0.0
         self.search_direction = 0.0 
@@ -121,8 +120,13 @@ class PersonFollower(Node):
         current_distance = msg.linear.x
         target_angle_rad = msg.angular.z
         
-        # 0.0 깡통 데이터 필터링 조건
-        is_invalid_data = (mode == 0.0 and current_distance <= 0.01)
+        # [강력한 예외 처리] 외부에서 1.0(좌측 서치), 2.0(우측 서치)이 아닌 이상한 mode 값을 보내면 
+        # 무조건 0.0(기본 추종)으로 강제 보정하여 로직이 꼬이는 것을 방지합니다.
+        if mode not in [1.0, 2.0]:
+            mode = 0.0
+            
+        # [핵심 수정] 거리와 각도가 모두 0일 때, 깡통 데이터(유실)로 강력 필터링
+        is_invalid_data = (mode == 0.0 and abs(current_distance) <= 0.01 and abs(target_angle_rad) <= 0.01)
 
         if not is_invalid_data:
             if self.is_auto_searching:
@@ -151,13 +155,11 @@ class PersonFollower(Node):
                     if abs(target_angle_rad) < self.deadband_angular: cmd_msg.angular.z = 0.0
                     else: cmd_msg.angular.z = max(min(target_angle_rad * self.kp_angular, self.max_angular_speed), -self.max_angular_speed)
 
-            # 비전 보드 매뉴얼 탐색 로직 (원상 복구)
             elif mode == 1.0 or mode == 2.0:
                 status_text = "🔍⬅️ SEARCH_L" if mode == 1.0 else "🔍➡️ SEARCH_R"
                 direction = 1.0 if mode == 1.0 else -1.0
                 current_time = time.time()
                 
-                # 완벽하게 동작하던 0.5초 정지 시간
                 total_step_duration = self.search_rotate_duration + 0.5 
                 
                 if not self.is_searching or (current_time - self.search_start_time > total_step_duration):
@@ -169,7 +171,7 @@ class PersonFollower(Node):
                     cmd_msg.angular.z = self.search_direction * self.search_speed
                     status_text += "_ROT"
                 else:
-                    cmd_msg.angular.z = 0.0 # 명시적 0명령 하달
+                    cmd_msg.angular.z = 0.0 
                     status_text += "_WAIT"
 
             self.publisher.publish(cmd_msg)
@@ -197,7 +199,6 @@ class PersonFollower(Node):
         time_diff = (now_time - self.last_msg_time).nanoseconds / 1e9
         time_since_start = (now_time - self.mode_start_time).nanoseconds / 1e9
         
-        # 50번 모드 진입 시 초기 7초만 대기
         if self.current_agv_mode == 50 and time_since_start < 7.0:
             if time_diff > 1.0: 
                 cmd_msg = Twist()
@@ -213,8 +214,6 @@ class PersonFollower(Node):
             if not self.is_auto_searching:
                 self.is_auto_searching = True
                 self.auto_search_direction = 1.0 if self.last_known_angle >= 0 else -1.0
-                
-                # [버그 수정] 오류 많던 상태머신 폐기. 가장 완벽히 작동하던 시간 누적 방식으로 통일
                 self.search_start_time = time.time()
                 
                 dir_str = "좌측" if self.auto_search_direction > 0 else "우측"
@@ -225,16 +224,13 @@ class PersonFollower(Node):
                 current_sys_time = time.time()
                 total_step_duration = self.search_rotate_duration + 0.5
 
-                # 1 사이클(회전 + 0.5초 정지)이 끝나면 시간 초기화하여 다음 10도 회전 준비
                 if current_sys_time - self.search_start_time > total_step_duration:
                     self.search_start_time = current_sys_time
 
-                # 회전 구간 (약 0 ~ 0.58초)
                 if current_sys_time - self.search_start_time < self.search_rotate_duration:
                     cmd_msg.angular.z = self.auto_search_direction * self.search_speed
-                # 정지 구간 (약 0.58초 ~ 1.08초)
                 else:
-                    cmd_msg.angular.z = 0.0 # 확실하게 힘을 0으로 줍니다.
+                    cmd_msg.angular.z = 0.0 
 
                 self.publisher.publish(cmd_msg)
 
