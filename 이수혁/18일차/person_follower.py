@@ -52,7 +52,7 @@ class PersonFollower(Node):
         self.auto_search_direction = 1.0
         
         self.watchdog_timer = self.create_timer(0.1, self.watchdog_check)
-        self.get_logger().info('Person Follower Node (FSM 연동 최적화 및 0.5초 정밀 끊어치기 탐색) started!')
+        self.get_logger().info('Person Follower Node (모드별 가변 정지 시간 끊어치기 탐색) started!')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -76,8 +76,8 @@ class PersonFollower(Node):
             self.send_log('▶️ 10번 모드 진입: 1.0m 간격 사람 추종을 시작합니다.')
             
         elif self.current_agv_mode == 50 and prev_mode != 50:
-            self.target_distance = 0.50  # <--- 목표 거리를 50cm로 상향
-            self.safe_distance = 0.35    # <--- 긴급 제동 거리를 35cm로 설정 (15cm 여유 버퍼)      
+            self.target_distance = 0.50  
+            self.safe_distance = 0.35    
             self.is_auto_searching = False
             self.last_msg_time = self.get_clock().now()
             self.mode_start_time = self.get_clock().now()
@@ -126,49 +126,62 @@ class PersonFollower(Node):
         current_distance = msg.linear.x
         target_angle_rad = msg.angular.z
         
-        self.last_known_angle = target_angle_rad 
-        
-        cmd_msg = Twist()
-        status_text = f"🎯 TRACKING ({int(self.target_distance*100)}cm)"
-
-        if mode == 0.0:
-            self.is_searching = False 
+        if mode not in [1.0, 2.0]:
+            mode = 0.0
             
-            if self.min_dist_front < self.safe_distance:
-                status_text = "🚨 AVOIDANCE"
-                cmd_msg.linear.x = -0.15 
-                if self.min_dist_left > self.min_dist_right: cmd_msg.angular.z = 0.4  
-                else: cmd_msg.angular.z = -0.4 
-            else:
-                distance_error = current_distance - self.target_distance
-                if abs(distance_error) < self.deadband_linear: cmd_msg.linear.x = 0.0
-                else: cmd_msg.linear.x = max(min(distance_error * self.kp_linear, self.max_linear_speed), -self.max_linear_speed)
+        is_invalid_data = (mode == 0.0 and abs(current_distance) <= 0.01 and abs(target_angle_rad) <= 0.01)
 
-                if abs(target_angle_rad) < self.deadband_angular: cmd_msg.angular.z = 0.0
-                else: cmd_msg.angular.z = max(min(target_angle_rad * self.kp_angular, self.max_angular_speed), -self.max_angular_speed)
-
-        elif mode == 1.0 or mode == 2.0:
-            status_text = "🔍⬅️ SEARCH_L" if mode == 1.0 else "🔍➡️ SEARCH_R"
-            direction = 1.0 if mode == 1.0 else -1.0
-            current_time = time.time()
+        if not is_invalid_data:
+            if self.is_auto_searching:
+                self.send_log('✅ 대상을 다시 발견했습니다! 유도를 재개합니다.')
+                self.is_auto_searching = False
+                
+            self.last_msg_time = self.get_clock().now()
+            self.last_known_angle = target_angle_rad 
             
-            total_step_duration = self.search_rotate_duration + 0.5 
-            
-            if not self.is_searching or (current_time - self.search_start_time > total_step_duration):
-                self.is_searching = True
-                self.search_start_time = current_time
-                self.search_direction = direction
+            cmd_msg = Twist()
+            status_text = f"🎯 TRACKING ({int(self.target_distance*100)}cm)"
 
-            if current_time - self.search_start_time < self.search_rotate_duration:
-                cmd_msg.angular.z = self.search_direction * self.search_speed
-                status_text += "_ROT"
-            else:
-                cmd_msg.angular.z = 0.0 
-                status_text += "_WAIT"
+            if mode == 0.0:
+                self.is_searching = False 
+                
+                if self.min_dist_front < self.safe_distance:
+                    status_text = "🚨 AVOIDANCE"
+                    cmd_msg.linear.x = -0.15 
+                    if self.min_dist_left > self.min_dist_right: cmd_msg.angular.z = 0.4  
+                    else: cmd_msg.angular.z = -0.4 
+                else:
+                    distance_error = current_distance - self.target_distance
+                    if abs(distance_error) < self.deadband_linear: cmd_msg.linear.x = 0.0
+                    else: cmd_msg.linear.x = max(min(distance_error * self.kp_linear, self.max_linear_speed), -self.max_linear_speed)
 
-        self.publisher.publish(cmd_msg)
-        self.current_mode_text = status_text
-        self.print_clean_log(current_distance, target_angle_rad)
+                    if abs(target_angle_rad) < self.deadband_angular: cmd_msg.angular.z = 0.0
+                    else: cmd_msg.angular.z = max(min(target_angle_rad * self.kp_angular, self.max_angular_speed), -self.max_angular_speed)
+
+            elif mode == 1.0 or mode == 2.0:
+                status_text = "🔍⬅️ SEARCH_L" if mode == 1.0 else "🔍➡️ SEARCH_R"
+                direction = 1.0 if mode == 1.0 else -1.0
+                current_time = time.time()
+                
+                # 모드에 따른 탐색 정지 시간 분기 (10번: 0.5초, 50번: 1.0초)
+                stop_duration = 1.0 if self.current_agv_mode == 50 else 0.5
+                total_step_duration = self.search_rotate_duration + stop_duration
+                
+                if not self.is_searching or (current_time - self.search_start_time > total_step_duration):
+                    self.is_searching = True
+                    self.search_start_time = current_time
+                    self.search_direction = direction
+
+                if current_time - self.search_start_time < self.search_rotate_duration:
+                    cmd_msg.angular.z = self.search_direction * self.search_speed
+                    status_text += "_ROT"
+                else:
+                    cmd_msg.angular.z = 0.0 
+                    status_text += "_WAIT"
+
+            self.publisher.publish(cmd_msg)
+            self.current_mode_text = status_text
+            self.print_clean_log(current_distance, target_angle_rad)
 
     def watchdog_check(self):
         if self.current_agv_mode not in [10, 50]: return
@@ -177,7 +190,6 @@ class PersonFollower(Node):
         time_diff = (now_time - self.last_msg_time).nanoseconds / 1e9
         time_since_start = (now_time - self.mode_start_time).nanoseconds / 1e9
         
-        # 50번 픽업 모드 진입 시 초기 7초간 대기 (이때는 통신이 끊겨도 회전하지 않음)
         if self.current_agv_mode == 50 and time_since_start < 7.0:
             if time_diff > 1.0: 
                 cmd_msg = Twist()
@@ -189,8 +201,9 @@ class PersonFollower(Node):
                     self.last_log_time = now_time
             return 
             
-        # 초기 대기가 끝났거나 10번 모드일 때, 1초 이상 데이터가 안 들어오면 자동 탐색 시작
-        if time_diff > 1.0:
+        timeout_limit = 3.0 if self.current_agv_mode == 50 else 1.0
+        
+        if time_diff > timeout_limit:
             if not self.is_auto_searching:
                 self.is_auto_searching = True
                 self.auto_search_direction = 1.0 if self.last_known_angle >= 0 else -1.0
@@ -202,12 +215,14 @@ class PersonFollower(Node):
             if self.is_auto_searching:
                 cmd_msg = Twist()
                 current_sys_time = time.time()
-                total_step_duration = self.search_rotate_duration + 0.5
+                
+                # 모드에 따른 탐색 정지 시간 분기 (10번: 0.5초, 50번: 1.0초)
+                stop_duration = 1.0 if self.current_agv_mode == 50 else 0.5
+                total_step_duration = self.search_rotate_duration + stop_duration
 
                 if current_sys_time - self.search_start_time > total_step_duration:
                     self.search_start_time = current_sys_time
 
-                # 10도 회전(0~0.58초) 후 정지(0.58~1.08초) 반복
                 if current_sys_time - self.search_start_time < self.search_rotate_duration:
                     cmd_msg.angular.z = self.auto_search_direction * self.search_speed
                 else:
