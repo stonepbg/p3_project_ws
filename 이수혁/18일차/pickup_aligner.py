@@ -30,7 +30,7 @@ class PickupAligner(Node):
         
         self.last_log_time = time.time()
         
-        self.get_logger().info('🧩 픽업 밀착 노드 가동 (원상 복구 완료 / 물리적 전방 25cm 정지 적용)')
+        self.get_logger().info('🧩 픽업 밀착 노드 가동 (원상 복구 완료 / 물리적 전방 22cm 정지 적용)')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -112,8 +112,8 @@ class PickupAligner(Node):
             # 제어 로직 (평행 맞추기 -> 전진 -> 물리적 전방 기준 정지)
             # ----------------------------------------------------
             
-            # [1순위] 정지거리가 25cm(0.25m) 이하가 되면 무조건 즉시 종료
-            if min_stop_dist <= 0.25:
+            # [1순위] 정지거리가 22cm(0.22m) 이하가 되면 무조건 즉시 종료
+            if min_stop_dist <= 0.22:
                 twist.linear.x = 0.0
                 twist.linear.y = 0.0
                 twist.angular.z = 0.0
