@@ -76,8 +76,8 @@ class PersonFollower(Node):
             self.send_log('▶️ 10번 모드 진입: 1.0m 간격 사람 추종을 시작합니다.')
             
         elif self.current_agv_mode == 50 and prev_mode != 50:
-            self.target_distance = 0.30  
-            self.safe_distance = 0.20    
+            self.target_distance = 0.50  # <--- 목표 거리를 50cm로 상향
+            self.safe_distance = 0.35    # <--- 긴급 제동 거리를 35cm로 설정 (15cm 여유 버퍼)      
             self.is_auto_searching = False
             self.last_msg_time = self.get_clock().now()
             self.mode_start_time = self.get_clock().now()
