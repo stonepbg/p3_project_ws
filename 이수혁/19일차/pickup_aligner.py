@@ -48,8 +48,8 @@ class PickupAligner(Node):
         if self.current_agv_mode != 51: return
         
         if self.state == 'WAITING':
-            #  실제 목적지보다 왼쪽으로 22cm(0.22m) 더 가도록 Y 좌표 보정 (+가 왼쪽)
-            self.target_y = msg.y + 0.22
+            #  실제 목적지보다 왼쪽으로 15cm(0.15m) 더 가도록 Y 좌표 보정 (+가 왼쪽)
+            self.target_y = msg.y + 0.15
             
             # 로그 메시지도 원본과 보정된 Y오차를 함께 표시하도록 수정
             self.send_log(f'🎯 목표 좌표 수신 (원본: {msg.y:.2f}m -> 보정 Y오차: {self.target_y:.2f}m). 52번 신호 발송.')
