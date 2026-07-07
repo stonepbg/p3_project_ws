@@ -1,0 +1,95 @@
+대시보드 엔지니어 전달용으로 WSL에서 할 작업 전체를 정리합니다.
+
+---
+
+## 대시보드(WSL, Jazzy) zenoh 브릿지 설치·설정 안내
+
+### 배경
+Jazzy(CycloneDDS) 대시보드와 Humble/Galactic(Fast-DDS) 장비들이 같은 DDS 도메인에 있어 `sequence size exceeds remaining buffer` 에러가 발생 중. 대시보드를 zenoh 브릿지로 분리해 오린나노(192.168.0.103) 브릿지와 TCP로만 통신하도록 변경.
+
+### 1. 브릿지 설치
+
+```bash
+
+echo "deb [trusted=yes] https://download.eclipse.org/zenoh/debian-repo/ /" | sudo tee /etc/apt/sources.list.d/zenoh.list > /dev/null
+sudo apt update
+sudo apt install -y zenoh-bridge-ros2dds
+zenoh-bridge-ros2dds --version
+
+```
+
+GPG 경고(NO_PUBKEY)는 무시 가능. `v1.9.0` 출력되면 정상.
+
+### 2. 설정 파일 작성
+
+```bash
+
+mkdir -p ~/zenoh
+cat > ~/zenoh/bridge_dash.json5 << 'EOF'
+{
+  plugins: {
+    ros2dds: {
+      // 대시보드 발행 토픽은 zenoh로 내보내고, 수신 토픽은 zenoh에서 받아옴
+      allow: {
+        publishers: [
+          "/nano_send_status",
+          "/manual_cmd"
+        ],
+        subscribers: [
+          "/AGV_log",
+          "/agv_mode",
+          "/AGV_status",
+          "/traffic_sign_topic",
+          "/control_state"
+        ]
+      },
+      ros_localhost_only: true
+    }
+  },
+  mode: "client",
+  connect: { endpoints: ["tcp/192.168.0.103:7447"] }
+}
+EOF
+
+```
+
+핵심: `ros_localhost_only: true`로 대시보드 DDS를 WSL 내부에 가둠(외부 장비와 직접 DDS discovery 차단). 외부와는 오린나노 브릿지(7447)로만 통신.
+
+### 3. 대시보드 노드도 localhost 설정
+
+dashboard_node.py 실행 전 환경변수 추가 (또는 코드 상단 os.environ에 추가):
+
+```bash
+
+export ROS_LOCALHOST_ONLY=1
+
+```
+
+이걸 안 하면 대시보드 노드가 여전히 외부 장비와 직접 DDS discovery를 시도해 에러가 계속 남.
+
+### 4. 실행 순서
+
+```bash
+
+# 터미널 1: 브릿지 먼저
+
+zenoh-bridge-ros2dds -c ~/zenoh/bridge_dash.json5
+
+# 터미널 2: 대시보드 (ROS_LOCALHOST_ONLY=1 상태로)
+
+export ROS_LOCALHOST_ONLY=1
+python3 dashboard_node.py
+
+```
+
+### 5. 확인 포인트
+- 브릿지 로그에 `connected to tcp/192.168.0.103:7447` 류 접속 로그
+- 브릿지 로그에 `/nano_send_status`, `/manual_cmd` Allowed + Route created
+- 대시보드에서 모드 버튼/방향키 조작 시 오린나노·AGV에 정상 전달
+- 오린나노 쪽 `sequence size exceeds remaining buffer` 로그 소멸
+
+---
+
+전제 조건: 오린나노에서 브릿지(`zenoh-bridge-ros2dds -c ~/zenoh/bridge_orin.json5`)가 먼저 떠 있어야 합니다. 
+대시보드 엔지니어 작업 완료 후 오린나노 쪽 브릿지를 상시 실행(systemd 등록)으로 전환하는 작업을 이어서 진행하겠습니다. 
+전달 후 결과 주십시오.
