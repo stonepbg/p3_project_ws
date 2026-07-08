@@ -40,14 +40,18 @@ class PickupAligner(Node):
         self.stabilize_start_time = 0.0  
         self.wait_start_time = 0.0
         self.blind_search_start = 0.0
+        self.request_time = 0.0
         self.last_log_time = time.time()
         
         self.current_map_yaw = None 
         self.turn_sign = 0.0         
         self.blind_search_dir = 0.0  
-        self.target_valid = False
         
-        self.get_logger().info('🧩 픽업 밀착 노드 가동 (판정 기준 0.05 라디안 복구 완료)')
+        # 상태 제어 플래그
+        self.target_seen = False             # 1차적으로 시야에 들어왔는지 여부
+        self.exact_target_received = False   # 4번 신호 이후의 정확한 좌표인지 여부
+        
+        self.get_logger().info('🧩 픽업 밀착 노드 가동 (타겟 발견 시 정지 후 4번 좌표 갱신 로직 적용 완료)')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -70,23 +74,25 @@ class PickupAligner(Node):
         if self.current_agv_mode == 51 and prev != 51:
             self.state = 'APPROACH_50'
             self.approach_start_time = time.time()
-            self.send_log('🚀 51번 진입: 현재 각도를 유지하며 타겟 50cm 앞까지 직진합니다.')
+            self.send_log('🚀 51번 진입: 타겟 50cm 앞까지 직진합니다.')
         elif self.current_agv_mode != 51:
             self.state = 'WAITING'
 
     def target_callback(self, msg):
         if self.current_agv_mode != 51: return
         
-        if self.state in ['WAITING_TARGET_STRICT', 'BLIND_SEARCH']:
-            if abs(msg.y) > 0.40:
-                if time.time() - self.last_log_time > 1.0:
-                    self.send_log(f'⚠️ 비정상 노이즈 타겟 무시 (오차: {msg.y:.2f}m)', 'warn')
-                    self.last_log_time = time.time()
-                return
-                
-            self.target_valid = True
+        # 오차가 너무 큰 쓰레기 값은 필터링
+        if abs(msg.y) > 0.40: return 
+            
+        # 대기 중이거나 시야 탐색 중일 때 블록이 보이면 '발견 플래그'만 켭니다 (게걸음 계산 안 함)
+        if self.state in ['WAIT_FOR_FIRST_SIGHT', 'BLIND_SEARCH']:
+            self.target_seen = True
+
+        # 4번 신호를 보낸 후 가장 정지되고 깨끗한 상태에서 새 좌표를 받을 때 게걸음을 계산합니다.
+        elif self.state == 'WAITING_EXACT_TARGET':
+            self.exact_target_received = True
             self.target_y = msg.y + 0.12
-            self.send_log(f'🎯 진짜 타겟 포착! (오차: {msg.y:.2f}m -> 보정: {self.target_y:.2f}m). 정밀 게걸음 시작.')
+            self.send_log(f'🎯 정확한 정밀 좌표 수신 완료! (보정 Y: {self.target_y:.2f}m). 게걸음 시작.')
             
             for _ in range(3):
                 ack_msg = Int32()
@@ -140,7 +146,7 @@ class PickupAligner(Node):
                 self.cmd_vel_pub.publish(twist)
             return
 
-        # [2단계] AMCL 맵 좌표 기반 정렬
+        # [2단계] AMCL 180도 정렬
         elif self.state == 'ALIGN_TO_STAND':
             if self.current_map_yaw is None: return
             
@@ -156,48 +162,48 @@ class PickupAligner(Node):
                 
                 twist.angular.z = self.turn_sign * speed
                 self.cmd_vel_pub.publish(twist)
-                
-                if current_time - self.last_log_time > 0.5:
-                    self.send_log(f'🔄 180도 맞추는 중... (오차: {math.degrees(error):.1f}도, 파워: {speed:.2f})')
-                    self.last_log_time = current_time
             else:
                 self.blind_search_dir = 1.0 if self.turn_sign < 0 else -1.0
-                
                 self.send_log('📐 180도 정렬 달성. 기체를 1.5초간 완벽히 정지합니다.')
                 self.state = 'ALIGN_STABILIZE'
                 self.stabilize_start_time = current_time
                 self.cmd_vel_pub.publish(Twist())
             return
 
-        # [3단계] 확실한 정지 및 안정화 대기
+        # [3단계] 안정화
         elif self.state == 'ALIGN_STABILIZE':
             self.cmd_vel_pub.publish(Twist())  
-            
             if current_time - self.stabilize_start_time > 1.5:
-                self.send_log('✅ 안정화 완료! 좌표 요청(4번) 신호를 보내고 2초 대기합니다.')
-                for _ in range(3):
-                    req_msg = Int32()
-                    req_msg.data = 4
-                    self.status_pub.publish(req_msg)
-                
-                self.target_valid = False
+                self.send_log('✅ 안정화 완료! 시야에 블록이 있는지 2초간 확인합니다.')
+                self.target_seen = False
                 self.wait_start_time = current_time
-                self.state = 'WAITING_TARGET_STRICT'
+                self.state = 'WAIT_FOR_FIRST_SIGHT'
             return
 
-        # [4단계] 타겟 응답 대기 (2초)
-        elif self.state == 'WAITING_TARGET_STRICT':
+        # [4단계] 첫 시야 확인
+        elif self.state == 'WAIT_FOR_FIRST_SIGHT':
+            self.cmd_vel_pub.publish(Twist()) # 제자리 대기
+            
+            # 카메라가 블록을 발견하면 즉시 좌표 요청 단계로 넘어감
+            if self.target_seen:
+                self.state = 'REQUEST_NEW_COORDINATE'
+                return
+                
             if current_time - self.wait_start_time > 2.0:
-                if not self.target_valid:
-                    dir_text = "왼쪽" if self.blind_search_dir > 0 else "오른쪽"
-                    self.send_log(f'⚠️ 타겟 유실! 회전 방향을 역산하여 [{dir_text}]으로 시야 탐색을 시작합니다.', 'warn')
-                    self.state = 'BLIND_SEARCH'
-                    self.blind_search_start = current_time
-            self.cmd_vel_pub.publish(Twist())
+                dir_text = "왼쪽" if self.blind_search_dir > 0 else "오른쪽"
+                self.send_log(f'⚠️ 시야에 타겟이 없습니다. [{dir_text}]으로 시야 탐색을 시작합니다.', 'warn')
+                self.state = 'BLIND_SEARCH'
+                self.blind_search_start = current_time
             return
 
-        # [5단계] 지능형 시야 탐색 (게걸음)
+        # [5단계] 시야 탐색 (블라인드 서치)
         elif self.state == 'BLIND_SEARCH':
+            # 게걸음 중 블록이 화면에 들어오면 즉시 게걸음 멈춤!
+            if self.target_seen:
+                self.cmd_vel_pub.publish(Twist()) # 강제 정지
+                self.state = 'REQUEST_NEW_COORDINATE'
+                return
+                
             if current_time - self.blind_search_start > 8.0:
                 self.send_log('❌ 8초간 탐색했으나 타겟을 찾지 못해 강제 종료합니다.', 'error')
                 self.state = 'DONE'
@@ -206,14 +212,32 @@ class PickupAligner(Node):
                 
             twist.linear.y = 0.05 * self.blind_search_dir
             self.cmd_vel_pub.publish(twist)
-            
-            if current_time - self.last_log_time > 1.0:
-                dir_text = "왼쪽" if self.blind_search_dir > 0 else "오른쪽"
-                self.send_log(f'👀 블록 탐색 게걸음 중... ({dir_text})')
-                self.last_log_time = current_time
             return
 
-        # [6단계] 정상 게걸음
+        # [6단계 - 핵심 신규] 정지 상태에서 4번 신호 발송 및 정밀 좌표 대기
+        elif self.state == 'REQUEST_NEW_COORDINATE':
+            self.cmd_vel_pub.publish(Twist()) # 바퀴가 완전히 멈췄는지 재차 확인
+            self.send_log('🛑 타겟 포착! 로봇을 멈추고 4번 신호를 보내 새 좌표를 요청합니다.')
+            
+            for _ in range(3):
+                req_msg = Int32()
+                req_msg.data = 4
+                self.status_pub.publish(req_msg)
+            
+            self.exact_target_received = False
+            self.request_time = current_time
+            self.state = 'WAITING_EXACT_TARGET'
+            return
+
+        elif self.state == 'WAITING_EXACT_TARGET':
+            self.cmd_vel_pub.publish(Twist()) # 계속 멈춰서 기다림
+            if current_time - self.request_time > 5.0:
+                self.send_log('⚠️ 4번 신호 응답 시간 초과. 작업을 종료합니다.', 'error')
+                self.state = 'DONE'
+            # target_callback 에서 새 좌표를 받으면 CRAB_WALK 로 자동으로 넘어갑니다.
+            return
+
+        # [7단계] 정상 게걸음
         elif self.state == 'CRAB_WALK':
             if current_time - self.crab_start_time < self.crab_duration:
                 twist.linear.y = 0.1 * self.crab_direction
@@ -223,7 +247,7 @@ class PickupAligner(Node):
                 self.state = 'ALIGNING'
             return
                 
-        # [7단계] 직진 밀착
+        # [8단계] 직진 밀착
         elif self.state == 'ALIGNING':
             if min_stop_dist <= 0.22:
                 twist.linear.x = 0.0
