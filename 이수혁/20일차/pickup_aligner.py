@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, Point
+from geometry_msgs.msg import Twist, Point, PoseWithCovarianceStamped
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Int32, String
 from rclpy.qos import qos_profile_sensor_data
@@ -14,6 +14,9 @@ class PickupAligner(Node):
         self.mode_sub = self.create_subscription(Int32, '/internal_mode', self.mode_callback, 10)
         self.target_sub = self.create_subscription(Point, '/pickup_target', self.target_callback, 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
+        
+        # [핵심 추가] 맵 상의 절대 내 위치(AMCL)를 받아오기 위한 구독
+        self.amcl_sub = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.amcl_callback, 10)
         
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.ack_pub = self.create_publisher(Int32, '/AGV_mode_ack', 10)
@@ -31,7 +34,9 @@ class PickupAligner(Node):
         self.align_start_time = 0.0
         self.last_log_time = time.time()
         
-        self.get_logger().info('🧩 픽업 밀착 노드 가동 (좌우 라이다 밸런싱 기반 부드러운 사전 정면 정렬 적용)')
+        self.current_map_yaw = None # 현재 맵 상의 내 절대 각도
+        
+        self.get_logger().info('🧩 픽업 밀착 노드 가동 (AMCL 맵 좌표 기반 순간이동 방지 및 절대 정면 정렬 적용)')
 
     def send_log(self, text, level='info'):
         if level == 'info': self.get_logger().info(text)
@@ -40,15 +45,21 @@ class PickupAligner(Node):
         msg.data = f"[픽업 밀착] {text}"
         self.log_pub.publish(msg)
 
+    def amcl_callback(self, msg):
+        # 쿼터니언 데이터를 사람이 읽을 수 있는 라디안(yaw) 각도로 변환
+        q = msg.pose.pose.orientation
+        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+        self.current_map_yaw = math.atan2(siny_cosp, cosy_cosp)
+
     def mode_callback(self, msg):
         prev = self.current_agv_mode
         self.current_agv_mode = msg.data
         
-        # 51번 모드 진입 시 불안정한 노이즈 탐색 대신, 부드러운 양측 밸런스 정렬 시작
         if self.current_agv_mode == 51 and prev != 51:
             self.state = 'ALIGN_TO_STAND'
             self.align_start_time = time.time()
-            self.send_log('🔄 51번 모드 진입: 라이다 좌/우 거리를 비교하여 가판대 정면으로 부드럽게 회전합니다.')
+            self.send_log('🔄 51번 진입: 맵 좌표(AMCL)를 이용해 2,3,4,5번 반대편 가판대(서쪽, 180도)로 정렬합니다.')
         elif self.current_agv_mode != 51:
             self.state = 'WAITING'
 
@@ -56,9 +67,7 @@ class PickupAligner(Node):
         if self.current_agv_mode != 51: return
         
         if self.state == 'WAITING_TARGET':
-            # 실제 목적지보다 왼쪽으로 12cm 더 가도록 Y 좌표 보정
             self.target_y = msg.y + 0.12
-            
             self.send_log(f'🎯 목표 좌표 수신 (원본: {msg.y:.2f}m -> 보정 Y오차: {self.target_y:.2f}m). 52번 신호 발송.')
             
             for _ in range(3):
@@ -81,7 +90,47 @@ class PickupAligner(Node):
         twist = Twist()
         
         # ----------------------------------------------------
-        # 공통 라이다 데이터 파싱 (루프 상단에서 한 번만 처리하여 최적화)
+        # [1단계] AMCL 맵 좌표 기반 절대 정렬 (라이다 노이즈 무시)
+        # ----------------------------------------------------
+        if self.state == 'ALIGN_TO_STAND':
+            if self.current_map_yaw is None:
+                if current_time - self.last_log_time > 1.0:
+                    self.send_log('⏳ 맵 위치(AMCL) 데이터를 기다리는 중입니다...')
+                    self.last_log_time = current_time
+                return
+            
+            # 타겟 각도: 서쪽 (180도 = math.pi). 2,3,4,5번 마커의 반대편.
+            target_yaw = math.pi 
+            error = target_yaw - self.current_map_yaw
+            
+            # 오차를 -180도 ~ 180도(-pi ~ pi) 사이로 정규화
+            while error > math.pi: error -= 2.0 * math.pi
+            while error < -math.pi: error += 2.0 * math.pi
+            
+            # 무한 대기 방지
+            if current_time - self.align_start_time > 8.0:
+                self.send_log('⚠️ 맵 기반 자세 교정 시간 초과. 타겟 탐색을 대기합니다.', 'warn')
+                self.state = 'WAITING_TARGET'
+                self.cmd_vel_pub.publish(Twist())
+                return
+                
+            # 오차가 약 2.8도(0.05 rad) 이내가 될 때까지 부드럽게 P 제어 회전
+            if abs(error) > 0.05:
+                # 휠 슬립과 순간이동(AMCL 튐)을 막기 위해 최대 속도를 0.3으로 부드럽게 제한
+                twist.angular.z = max(min(error * 0.8, 0.3), -0.3)
+                self.cmd_vel_pub.publish(twist)
+                
+                if current_time - self.last_log_time > 0.5:
+                    self.send_log(f'🔄 맵 좌표 기반 정렬 중... (현재: {math.degrees(self.current_map_yaw):.1f}도, 오차: {math.degrees(error):.1f}도)')
+                    self.last_log_time = current_time
+            else:
+                self.send_log('📐 가판대 정면(180도)으로 맵 기반 정렬 완료! 타겟 탐색 대기중.')
+                self.state = 'WAITING_TARGET'
+                self.cmd_vel_pub.publish(Twist())
+            return
+
+        # ----------------------------------------------------
+        # 공통 라이다 데이터 파싱 (ALIGNING 직진 밀착 단계 전용)
         # ----------------------------------------------------
         min_stop_dist = float('inf') 
         min_l = float('inf') 
@@ -90,14 +139,17 @@ class PickupAligner(Node):
         for i, r in enumerate(msg.ranges):
             if r < 0.05 or r > 8.0 or math.isinf(r) or math.isnan(r): continue
             angle = msg.angle_min + i * msg.angle_increment
-            deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
+            raw_deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
             
-            # 후면 충돌 방지용 (물리적 전방)
-            if deg >= 155 or deg <= -155: 
+            real_front_deg = raw_deg + 180.0
+            if real_front_deg > 180.0:
+                real_front_deg -= 360.0
+
+            if -25 <= real_front_deg <= 25:
                 min_stop_dist = min(min_stop_dist, r)
-            # 좌우 대각선 평행 비교용 (안정적인 데이터 구간)
-            if 15 <= deg <= 45: min_l = min(min_l, r)
-            elif -45 <= deg <= -15: min_r = min(min_r, r)
+            # 전진할 때는 이미 책상을 마주보고 있으므로 라이다 비교가 매우 안정적임
+            if 15 <= real_front_deg <= 45: min_l = min(min_l, r)
+            elif -45 <= real_front_deg <= -15: min_r = min(min_r, r)
             
         if math.isinf(min_stop_dist): min_stop_dist = 9.99
         if math.isinf(min_l): min_l = 9.99
@@ -106,37 +158,6 @@ class PickupAligner(Node):
         diff = 0.0
         if min_l != 9.99 and min_r != 9.99:
             diff = min_l - min_r
-
-        # ----------------------------------------------------
-        # [1단계] 사전 정면 정렬 (최단거리 대신, 좌우 밸런스 맞추기)
-        # ----------------------------------------------------
-        if self.state == 'ALIGN_TO_STAND':
-            # 무한 대기 방지 (5초 초과 시 타겟 탐색으로 강제 전환)
-            if current_time - self.align_start_time > 5.0:
-                self.send_log('⚠️ 자세 교정 시간 초과. 타겟 탐색을 대기합니다.', 'warn')
-                self.state = 'WAITING_TARGET'
-                self.cmd_vel_pub.publish(Twist())
-                return
-                
-            # 좌우 거리 오차가 2.5cm 이내가 될 때까지 부드럽게 제자리 회전
-            if min_l != 9.99 and min_r != 9.99:
-                if abs(diff) > 0.025:
-                    # 미끄러짐 방지를 위해 속도를 0.15 rad/s로 낮춤
-                    twist.angular.z = 0.15 if diff > 0 else -0.15
-                    self.cmd_vel_pub.publish(twist)
-                    
-                    if current_time - self.last_log_time > 0.5:
-                        self.send_log(f'🔄 정면 각도 부드럽게 교정 중... (좌우 오차: {abs(diff):.3f}m)')
-                        self.last_log_time = current_time
-                else:
-                    self.send_log('📐 가판대 수직 정면 회전 완료! 타겟 탐색 대기중.')
-                    self.state = 'WAITING_TARGET'
-                    self.cmd_vel_pub.publish(Twist())
-            else:
-                # 좌우 데이터가 충분하지 않으면 회전을 생략
-                self.state = 'WAITING_TARGET'
-                self.cmd_vel_pub.publish(Twist())
-            return
 
         # ----------------------------------------------------
         # [2단계] 메카넘 게걸음 (12cm 보정 이동)
@@ -158,7 +179,6 @@ class PickupAligner(Node):
                 self.send_log(f'🔍 [라이다] 정지최단거리: {min_stop_dist:.2f}m | 평행오차: {abs(diff):.2f}m')
                 self.last_log_time = current_time
             
-            # 정지거리가 22cm 이하가 되면 무조건 즉시 종료
             if min_stop_dist <= 0.22:
                 twist.linear.x = 0.0
                 twist.linear.y = 0.0
@@ -174,12 +194,9 @@ class PickupAligner(Node):
                 self.state = 'DONE'
                 return
                 
-            # 전진 중 각도가 틀어지면 직진 멈추고 제자리 회전 보정
             elif abs(diff) > 0.025 and min_l != 9.99 and min_r != 9.99:
                 twist.linear.x = 0.0  
                 twist.angular.z = 0.15 if diff > 0 else -0.15
-                
-            # 각도가 잘 맞았으면 전진
             else:
                 twist.angular.z = 0.0  
                 twist.linear.x = 0.05  
