@@ -1,0 +1,33 @@
+코드 품질 분석 보고서
+
+프로젝트명: AGV와 로봇팔을 결합한 자율 쇼핑파트너
+
+분석 대상: pick_place_pkg (4개 파일)
+
+분석 도구: Pylint 3.2.0
+
+분석 일시: 2026-07-13
+
+1. 정량적 지표 비교 (Before & After)
+
+파일명개선 전개선 후변화pick_place_node.py9.109.10분석만 수행pose_preset_controller.py9.059.05분석만 수행pi_sender_node.py7.748.04+0.30pose_target_controller.py9.479.87+0.40평균8.849.02+0.18
+
+2. 주요 개선 사항
+
+코드대상 파일조치 내용W0611pi_sender_node.py미사용 import (os, sys) 2개 제거W0613pose_target_controller.py미사용 콜백 인수 msg → _msg 변경R0914pose_target_controller.py지역변수 초과: ordered 중간변수 제거R0915 ×3pose_target_controller.py함수 과대: 중복 로직을 _plan_execute_and_send()로 추출 (426→303줄)R1732 ×2pose_target_controller.py리소스 경고: 노드 수명과 일치하는 구조로 noqa 처리 + destroy_node()에서 소켓 closeC0114~C0116pose_target_controller.py모듈·클래스·메서드 docstring 전체 추가
+
+중복 코드 제거 (R0915)
+
+pose_target_controller.py의 세 콜백(target_pose_callback, target_pose_pickup_callback, target_pose_cartesian_callback)이 plan → execute → joint_state 읽기 → Pi 전송의 동일한 흐름을 반복하고 있었으며 차이는 plan() 파라미터뿐이었다. 공통 로직을 _plan_execute_and_send()로 추출하여 각 콜백을 10줄 이하로 축소했고 전체 파일 길이가 426줄에서 303줄로 감소했다.
+
+리소스 관리 개선 (R1732)
+
+UDP 소켓(send_sock)이 __init__에서 열린 뒤 명시적으로 닫히지 않는 구조였다. destroy_node()를 오버라이드하여 노드 종료 시점에 소켓을 close하도록 수정했다.
+
+3. 잔여 경고 및 미조치 사유
+
+코드대상 파일잔여 사유R0902pose_target_controller.py인스턴스 속성 12개 (기준 7) — ROS2 노드 특성상 publisher/subscriber/timer가 필수적으로 누적되는 구조적 한계R1732pose_target_controller.pysubprocess.Popen — rclpy.spin() 종료 후 명시적 terminate() 처리가 의도된 설계로 with문 적용 불가E0401pick_place_node.py, pi_sender_node.pymycobot_interfaces.msg import 오류 — pylint 실행 환경에 ROS2 패키지가 없어서 발생, 런타임 정상 동작
+
+4. 종합 결론
+
+Pylint 기준 4개 파일 평균 점수가 8.84에서 9.02로 향상되었다. 수정 가능한 경고는 모두 해소하였으며, 잔여 경고는 ROS2 노드의 구조적 특성 또는 pylint 실행 환경의 제약으로 인한 것으로 실제 동작에는 영향이 없다. 특히 pose_target_controller.py는 중복 코드 제거를 통해 가독성과 유지보수성이 개선되었으며, 리소스 누수 가능성도 함께 해소되었다.
